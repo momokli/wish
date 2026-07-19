@@ -593,6 +593,50 @@
             }
             }
 
+
+            /* ── DJ-ready banner ── */
+            .dj-ready-banner {
+                text-align: center;
+                padding: 10px 16px;
+                margin-bottom: 12px;
+                background: rgba(34,197,94,0.06);
+                border: 1px solid rgba(34,197,94,0.15);
+                border-radius: 8px;
+                font-family: var(--font-mono);
+                font-size: 11px;
+                color: var(--status-ready);
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+            }
+            .dj-ready-banner .count {
+                font-size: 18px;
+                font-weight: 700;
+                display: block;
+                margin-bottom: 2px;
+            }
+            .dj-badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 3px;
+                font-family: var(--font-mono);
+                font-size: 8px;
+                text-transform: uppercase;
+                color: var(--status-ready);
+                background: rgba(34,197,94,0.08);
+                border: 1px solid rgba(34,197,94,0.15);
+                padding: 1px 5px;
+                border-radius: 3px;
+                margin-left: 6px;
+            }
+            .dj-badge::before {
+                content: '\25CF';
+                font-size: 6px;
+                animation: dj-pulse 2s infinite;
+            }
+            @keyframes dj-pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.25; }
+            }
             .bottom-nav {
                 position: absolute;
                 bottom: 0;
@@ -1358,6 +1402,12 @@
                     });
 
                     var html = "";
+
+                    /* ── DJ-ready banner ── */
+                    var readyCount = tasks.filter(function(t) { return t.status === "ready"; }).length;
+                    if (readyCount > 0) {
+                        html += '<div class="dj-ready-banner"><span class="count">' + readyCount + '</span>track' + (readyCount > 1 ? 's' : '') + ' ready for the DJ</div>';
+                    }
                     for (var i = 0; i < tasks.length; i++) {
                         var t = tasks[i];
                         var status = t.status || "pending";
@@ -1399,6 +1449,7 @@
                             status +
                             '">' +
                             escHtml(status.replace(/_/g, " ")) +
+                            (status === "ready" ? '<span class="dj-badge">DJ</span>' : '') +
                             "</div>" +
                             "</div>";
                     }
