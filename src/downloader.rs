@@ -1,16 +1,20 @@
 use sqlx::sqlite::SqlitePool;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 
 use crate::db;
 use crate::deemix::DeemixClient;
 
-/// Background worker that processes pending download submissions.
+const MAX_CONCURRENT: usize = 3;
+const MAX_RETRIES: u32 = 3;
+
 pub struct DownloadWorker {
     pool: SqlitePool,
     deemix: DeemixClient,
     output_dir: PathBuf,
-    notify: std::sync::Arc<Notify>,
+    notify: Arc<Notify>,
     ytdlp_available: bool,
 }
 
@@ -19,7 +23,7 @@ impl DownloadWorker {
         pool: SqlitePool,
         deemix: DeemixClient,
         output_dir: PathBuf,
-        notify: std::sync::Arc<Notify>,
+        notify: Arc<Notify>,
         ytdlp_available: bool,
     ) -> Self {
         Self {
@@ -31,109 +35,147 @@ impl DownloadWorker {
         }
     }
 
-    /// Start the background worker loop.
     pub async fn run(self) {
-        tracing::info!("Download worker started (yt-dlp: {})", self.ytdlp_available);
+        tracing::info!(
+            "Download worker started (yt-dlp: {}, max concurrent: {})",
+            self.ytdlp_available,
+            MAX_CONCURRENT
+        );
 
         loop {
             tokio::select! {
-                _ = self.notify.notified() => {
-                    tracing::debug!("Download worker notified");
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
-                    // Periodic check
-                }
+                _ = self.notify.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
             }
-
             if let Err(e) = self.process_pending().await {
-                tracing::error!("Error processing pending submissions: {}", e);
+                tracing::error!("Error processing: {}", e);
             }
         }
     }
 
     async fn process_pending(&self) -> anyhow::Result<()> {
         let pending = db::get_pending_submissions(&self.pool).await?;
-
         if pending.is_empty() {
             return Ok(());
         }
 
         tracing::info!("Processing {} pending submission(s)", pending.len());
 
-        for submission in pending {
-            if let Err(e) = self.process_submission(&submission).await {
-                tracing::error!(
-                    "Failed to process submission {} ({}): {}",
-                    submission.id,
-                    submission.spotify_url,
-                    e
-                );
-                let _ = db::update_submission_status(
-                    &self.pool,
-                    submission.id,
-                    "failed",
-                    None,
-                    None,
-                    Some(&e.to_string()),
-                )
-                .await;
+        let pool = self.pool.clone();
+        let deemix = self.deemix.clone();
+        let output_dir = self.output_dir.clone();
+        let ytdlp = self.ytdlp_available;
+
+        let mut set = JoinSet::new();
+        let mut inflight = 0usize;
+
+        for sub in pending {
+            let p = pool.clone();
+            let d = deemix.clone();
+            let o = output_dir.clone();
+
+            set.spawn(async move { process_one(p, d, o, ytdlp, sub).await });
+            inflight += 1;
+
+            if inflight >= MAX_CONCURRENT {
+                set.join_next().await;
+                inflight -= 1;
             }
         }
 
+        while (set.join_next().await).is_some() {}
         Ok(())
     }
+}
 
-    async fn process_submission(
-        &self,
-        submission: &crate::models::Submission,
-    ) -> anyhow::Result<()> {
-        let source = submission.source.as_str();
+async fn process_one(
+    pool: SqlitePool,
+    deemix: DeemixClient,
+    output_dir: PathBuf,
+    ytdlp_available: bool,
+    submission: crate::models::Submission,
+) {
+    let source = submission.source.as_str();
+    tracing::info!(
+        "[{}] processing {} [{}]",
+        submission.id,
+        submission.spotify_url,
+        source
+    );
 
-        tracing::info!(
-            "Processing submission {} [{}]: {}",
+    let result = match source {
+        "youtube" | "soundcloud" => {
+            download_yt(pool.clone(), &output_dir, ytdlp_available, &submission).await
+        }
+        _ => {
+            download_spotify(
+                pool.clone(),
+                &deemix,
+                &output_dir,
+                ytdlp_available,
+                &submission,
+            )
+            .await
+        }
+    };
+
+    if let Err(e) = result {
+        tracing::error!("[{}] permanently failed: {}", submission.id, e);
+        let _ = db::update_submission_status(
+            &pool,
             submission.id,
-            source,
-            submission.spotify_url
-        );
-
-        match source {
-            "youtube" | "soundcloud" => {
-                self.download_via_ytdlp(submission).await?;
-            }
-            _ => {
-                // Spotify: existing deemix → spotDL → yt-dlp pipeline
-                self.download_spotify(submission).await?;
-            }
-        }
-
-        Ok(())
+            "failed",
+            None,
+            None,
+            Some(&format!("All stages exhausted: {}", e)),
+        )
+        .await;
     }
+}
 
-    /// Download YouTube or SoundCloud track directly via yt-dlp.
-    async fn download_via_ytdlp(
-        &self,
-        submission: &crate::models::Submission,
-    ) -> anyhow::Result<()> {
-        if !self.ytdlp_available {
-            return Err(anyhow::anyhow!("yt-dlp not available on PATH"));
-        }
+// ── yt-dlp: YouTube / SoundCloud / Spotify fallback ──
 
-        db::update_submission_status(&self.pool, submission.id, "stage2_deemix", None, None, None)
-            .await?;
+async fn download_yt(
+    pool: SqlitePool,
+    output_dir: &Path,
+    ytdlp_available: bool,
+    sub: &crate::models::Submission,
+) -> anyhow::Result<()> {
+    if !ytdlp_available {
+        anyhow::bail!("yt-dlp not available");
+    }
+    let template = output_dir.join("%(artist)s - %(title)s [%(id)s].%(ext)s");
+    run_ytdlp(
+        &pool,
+        output_dir,
+        sub.id,
+        &template,
+        &sub.spotify_url,
+        "yt-dlp",
+    )
+    .await
+}
 
-        let output_template = self
-            .output_dir
-            .join("%(title)s-%(id)s.%(ext)s")
-            .to_string_lossy()
-            .to_string();
+async fn run_ytdlp(
+    pool: &SqlitePool,
+    output_dir: &Path,
+    submission_id: i64,
+    template: &Path,
+    url_or_query: &str,
+    label: &str,
+) -> anyhow::Result<()> {
+    let tmpl = template.to_string_lossy().to_string();
 
+    for attempt in 1..=MAX_RETRIES {
         tracing::info!(
-            "Downloading via yt-dlp: {} -> {}",
-            submission.spotify_url,
-            output_template
+            "[{}] {} attempt {}/{}",
+            submission_id,
+            label,
+            attempt,
+            MAX_RETRIES
         );
 
-        let result = tokio::process::Command::new("yt-dlp")
+        let out = tokio::process::Command::new("yt-dlp")
             .args([
                 "-f",
                 "bestaudio",
@@ -142,343 +184,221 @@ impl DownloadWorker {
                 "mp3",
                 "--audio-quality",
                 "0",
-                "-o",
-                &output_template,
+                "--embed-metadata",
+                "--embed-thumbnail",
                 "--no-playlist",
-                &submission.spotify_url,
+                "--no-overwrites",
+                "--print",
+                "after_move:filepath",
+                "-o",
+                &tmpl,
+                url_or_query,
             ])
             .output()
             .await;
 
-        match result {
-            Ok(output) => {
-                if output.status.success() {
-                    if let Some(filename) = self.find_downloaded_file(submission).await {
-                        let file_size = std::fs::metadata(self.output_dir.join(&filename))
-                            .ok()
-                            .map(|m| m.len() as i64);
-
-                        db::update_submission_status(
-                            &self.pool,
-                            submission.id,
-                            "ready",
-                            Some(&filename),
-                            file_size,
-                            None,
-                        )
-                        .await?;
-
-                        tracing::info!(
-                            "Submission {} downloaded via yt-dlp: {}",
-                            submission.id,
-                            filename
-                        );
-                    } else {
-                        db::update_submission_status(
-                            &self.pool,
-                            submission.id,
-                            "failed",
-                            None,
-                            None,
-                            Some("yt-dlp succeeded but couldn't find output file"),
-                        )
-                        .await?;
-                    }
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    db::update_submission_status(
-                        &self.pool,
-                        submission.id,
-                        "failed",
-                        None,
-                        None,
-                        Some(&format!("yt-dlp failed: {}", stderr)),
-                    )
-                    .await?;
+        match out {
+            Ok(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                if let Some(filepath) = stdout.lines().last().filter(|l| !l.trim().is_empty()) {
+                    let filename = Path::new(filepath)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| filepath.to_string());
+                    return mark_ready(pool, output_dir, submission_id, &filename, label).await;
                 }
-            }
-            Err(e) => {
-                db::update_submission_status(
-                    &self.pool,
-                    submission.id,
-                    "failed",
-                    None,
-                    None,
-                    Some(&format!("yt-dlp command error: {}", e)),
-                )
-                .await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Original Spotify pipeline: deemix → spotDL → yt-dlp fallback.
-    async fn download_spotify(&self, submission: &crate::models::Submission) -> anyhow::Result<()> {
-        // Stage 2: Try deemix
-        db::update_submission_status(&self.pool, submission.id, "stage2_deemix", None, None, None)
-            .await?;
-
-        let deemix_result = self.deemix.add_to_queue(&submission.spotify_url).await;
-
-        match deemix_result {
-            Ok(()) => {
-                match self
-                    .deemix
-                    .poll_until_done(&submission.spotify_url, 300)
-                    .await
-                {
-                    Ok(Some(item)) => {
-                        if item.status == "finished" || item.status == "downloaded" {
-                            if let Some(filename) = self.find_downloaded_file(submission).await {
-                                let file_size = std::fs::metadata(self.output_dir.join(&filename))
-                                    .ok()
-                                    .map(|m| m.len() as i64);
-
-                                db::update_submission_status(
-                                    &self.pool,
-                                    submission.id,
-                                    "ready",
-                                    Some(&filename),
-                                    file_size,
-                                    None,
-                                )
-                                .await?;
-
-                                tracing::info!(
-                                    "Submission {} downloaded via deemix: {}",
-                                    submission.id,
-                                    filename
-                                );
-                                return Ok(());
-                            }
-                        }
-                        tracing::warn!(
-                            "Deemix returned status '{}' for submission {}",
-                            item.status,
-                            submission.id
-                        );
-                    }
-                    Ok(None) => {
-                        tracing::warn!(
-                            "Deemix queue item not found for submission {}",
-                            submission.id
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Deemix polling failed for submission {}: {}",
-                            submission.id,
-                            e
-                        );
-                    }
+                // fallback: newest mp3
+                if let Some(f) = find_newest_mp3(output_dir).await {
+                    return mark_ready(pool, output_dir, submission_id, &f, label).await;
                 }
+                tracing::warn!("[{}] {}: can't determine output file", submission_id, label);
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let tail: String = stderr.lines().rev().take(2).collect::<Vec<_>>().join(" | ");
+                tracing::warn!(
+                    "[{}] {} failed (attempt {}): {}",
+                    submission_id,
+                    label,
+                    attempt,
+                    tail
+                );
             }
             Err(e) => {
                 tracing::warn!(
-                    "Deemix addToQueue failed for submission {}: {}",
-                    submission.id,
+                    "[{}] {} error (attempt {}): {}",
+                    submission_id,
+                    label,
+                    attempt,
                     e
                 );
             }
         }
 
-        // Stage 3: spotDL fallback
-        tracing::info!("Falling back to spotDL for submission {}", submission.id);
-
-        db::update_submission_status(&self.pool, submission.id, "stage3_spotdl", None, None, None)
-            .await?;
-
-        if self.try_spotdl(submission).await {
-            return Ok(());
+        if attempt < MAX_RETRIES {
+            tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt - 1))).await;
         }
-
-        // Stage 4: yt-dlp fallback (if available)
-        if self.ytdlp_available {
-            tracing::info!("Falling back to yt-dlp for submission {}", submission.id);
-
-            db::update_submission_status(
-                &self.pool,
-                submission.id,
-                "stage3_spotdl",
-                None,
-                None,
-                None,
-            )
-            .await?;
-
-            let search_query = if let (Some(title), Some(artist)) =
-                (&submission.track_title, &submission.track_artist)
-            {
-                format!("ytsearch1:{} {}", artist, title)
-            } else {
-                return Err(anyhow::anyhow!(
-                    "No track metadata available for yt-dlp search"
-                ));
-            };
-
-            let output_template = self
-                .output_dir
-                .join("%(title)s-%(id)s.%(ext)s")
-                .to_string_lossy()
-                .to_string();
-
-            let result = tokio::process::Command::new("yt-dlp")
-                .args([
-                    "-f",
-                    "bestaudio",
-                    "--extract-audio",
-                    "--audio-format",
-                    "mp3",
-                    "-o",
-                    &output_template,
-                    &search_query,
-                ])
-                .output()
-                .await;
-
-            match result {
-                Ok(output) => {
-                    if output.status.success() {
-                        if let Some(filename) = self.find_downloaded_file(submission).await {
-                            let file_size = std::fs::metadata(self.output_dir.join(&filename))
-                                .ok()
-                                .map(|m| m.len() as i64);
-
-                            db::update_submission_status(
-                                &self.pool,
-                                submission.id,
-                                "ready",
-                                Some(&filename),
-                                file_size,
-                                None,
-                            )
-                            .await?;
-
-                            tracing::info!(
-                                "Submission {} downloaded via yt-dlp (fallback): {}",
-                                submission.id,
-                                filename
-                            );
-                            return Ok(());
-                        }
-                    }
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    db::update_submission_status(
-                        &self.pool,
-                        submission.id,
-                        "failed",
-                        None,
-                        None,
-                        Some(&format!("yt-dlp fallback failed: {}", stderr)),
-                    )
-                    .await?;
-                }
-                Err(e) => {
-                    db::update_submission_status(
-                        &self.pool,
-                        submission.id,
-                        "failed",
-                        None,
-                        None,
-                        Some(&format!("yt-dlp fallback error: {}", e)),
-                    )
-                    .await?;
-                }
-            }
-        } else {
-            db::update_submission_status(
-                &self.pool,
-                submission.id,
-                "failed",
-                None,
-                None,
-                Some("All download methods exhausted (deemix, spotDL, yt-dlp not available)"),
-            )
-            .await?;
-        }
-
-        Ok(())
     }
 
-    /// Try spotDL download. Returns true on success.
-    async fn try_spotdl(&self, submission: &crate::models::Submission) -> bool {
-        let result = tokio::process::Command::new("spotdl")
-            .arg("download")
-            .arg(&submission.spotify_url)
-            .arg("--output")
-            .arg(&self.output_dir)
+    anyhow::bail!("{} failed after {} attempts", label, MAX_RETRIES);
+}
+
+// ── Spotify pipeline ──
+
+async fn download_spotify(
+    pool: SqlitePool,
+    deemix: &DeemixClient,
+    output_dir: &Path,
+    ytdlp_available: bool,
+    sub: &crate::models::Submission,
+) -> anyhow::Result<()> {
+    // Stage 1: deemix
+    let _ = db::update_submission_status(&pool, sub.id, "stage2_deemix", None, None, None).await;
+    if try_deemix(&pool, deemix, output_dir, sub).await {
+        return Ok(());
+    }
+
+    // Stage 2: spotDL
+    let _ = db::update_submission_status(&pool, sub.id, "stage3_spotdl", None, None, None).await;
+    if try_spotdl(&pool, output_dir, sub).await {
+        return Ok(());
+    }
+
+    // Stage 3: yt-dlp search fallback
+    if ytdlp_available {
+        if let (Some(title), Some(artist)) = (&sub.track_title, &sub.track_artist) {
+            let q = format!("ytsearch1:{} - {}", artist, title);
+            let template = output_dir.join("%(artist)s - %(title)s [%(id)s].%(ext)s");
+            if run_ytdlp(
+                &pool,
+                output_dir,
+                sub.id,
+                &template,
+                &q,
+                "yt-dlp (spotify fallback)",
+            )
+            .await
+            .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    anyhow::bail!("deemix + spotDL + yt-dlp all failed");
+}
+
+async fn try_deemix(
+    pool: &SqlitePool,
+    deemix: &DeemixClient,
+    output_dir: &Path,
+    sub: &crate::models::Submission,
+) -> bool {
+    tracing::info!("[{}] trying deemix", sub.id);
+
+    match deemix.add_to_queue(&sub.spotify_url).await {
+        Ok(()) => match deemix.poll_until_done(&sub.spotify_url, 300).await {
+            Ok(Some(item)) if item.status == "finished" || item.status == "downloaded" => {
+                if let Some(f) = find_newest_mp3(output_dir).await {
+                    let _ = mark_ready(pool, output_dir, sub.id, &f, "deemix").await;
+                    return true;
+                }
+                tracing::warn!("[{}] deemix done but no file found", sub.id);
+            }
+            Ok(Some(item)) => tracing::warn!("[{}] deemix status: {}", sub.id, item.status),
+            Ok(None) => tracing::warn!("[{}] deemix item vanished", sub.id),
+            Err(e) => tracing::warn!("[{}] deemix poll error: {}", sub.id, e),
+        },
+        Err(e) => tracing::warn!("[{}] deemix queue error: {}", sub.id, e),
+    }
+    false
+}
+
+async fn try_spotdl(pool: &SqlitePool, output_dir: &Path, sub: &crate::models::Submission) -> bool {
+    let fmt = output_dir.join("{title} - {artists}.{ext}");
+    let fmt_str = fmt.to_string_lossy().to_string();
+
+    for attempt in 1..=MAX_RETRIES {
+        tracing::info!("[{}] spotDL attempt {}/{}", sub.id, attempt, MAX_RETRIES);
+
+        let out = tokio::process::Command::new("spotdl")
+            .args([
+                "download",
+                &sub.spotify_url,
+                "--output",
+                &fmt_str,
+                "--bitrate",
+                "320k",
+                "--no-overwrites",
+            ])
             .output()
             .await;
 
-        match result {
-            Ok(output) => {
-                if output.status.success() {
-                    if let Some(filename) = self.find_downloaded_file(submission).await {
-                        let file_size = std::fs::metadata(self.output_dir.join(&filename))
-                            .ok()
-                            .map(|m| m.len() as i64);
-
-                        let _ = db::update_submission_status(
-                            &self.pool,
-                            submission.id,
-                            "ready",
-                            Some(&filename),
-                            file_size,
-                            None,
-                        )
-                        .await;
-
-                        tracing::info!(
-                            "Submission {} downloaded via spotDL: {}",
-                            submission.id,
-                            filename
-                        );
-                        return true;
-                    } else {
-                        let _ = db::update_submission_status(
-                            &self.pool,
-                            submission.id,
-                            "failed",
-                            None,
-                            None,
-                            Some("spotDL succeeded but couldn't find output file"),
-                        )
-                        .await;
-                        return false;
-                    }
+        match out {
+            Ok(o) if o.status.success() => {
+                if let Some(f) = find_newest_mp3(output_dir).await {
+                    let _ = mark_ready(pool, output_dir, sub.id, &f, "spotDL").await;
+                    return true;
                 }
-
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                tracing::warn!("spotDL failed for {}: {}", submission.id, stderr);
-                false
+                tracing::warn!("[{}] spotDL done but no file found", sub.id);
+                return false;
             }
-            Err(e) => {
-                tracing::warn!("spotDL command error for {}: {}", submission.id, e);
-                false
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!(
+                    "[{}] spotDL failed (attempt {}): {}",
+                    sub.id,
+                    attempt,
+                    stderr.lines().last().unwrap_or("")
+                );
+            }
+            Err(e) => tracing::warn!("[{}] spotDL error (attempt {}): {}", sub.id, attempt, e),
+        }
+
+        if attempt < MAX_RETRIES {
+            tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt - 1))).await;
+        }
+    }
+    false
+}
+
+// ── Helpers ──
+
+async fn mark_ready(
+    pool: &SqlitePool,
+    output_dir: &Path,
+    id: i64,
+    filename: &str,
+    stage: &str,
+) -> anyhow::Result<()> {
+    let size = tokio::fs::metadata(output_dir.join(filename))
+        .await
+        .ok()
+        .map(|m| m.len() as i64);
+
+    db::update_submission_status(pool, id, "ready", Some(filename), size, None).await?;
+    tracing::info!("[{}] ready via {}: {}", id, stage, filename);
+    Ok(())
+}
+
+async fn find_newest_mp3(dir: &Path) -> Option<String> {
+    let mut entries = tokio::fs::read_dir(dir).await.ok()?;
+    let mut best: Option<(String, std::time::SystemTime)> = None;
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".mp3") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata().await {
+            if let Ok(mt) = meta.modified() {
+                match &best {
+                    None => best = Some((name, mt)),
+                    Some((_, prev)) if mt > *prev => best = Some((name, mt)),
+                    _ => {}
+                }
             }
         }
     }
-
-    /// Try to find a downloaded file for a submission.
-    async fn find_downloaded_file(&self, submission: &crate::models::Submission) -> Option<String> {
-        let mut entries = tokio::fs::read_dir(&self.output_dir).await.ok()?;
-
-        let title = submission.track_title.as_deref().unwrap_or("");
-        let artist = submission.track_artist.as_deref().unwrap_or("");
-
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let filename = entry.file_name();
-            let name = filename.to_string_lossy().to_string();
-
-            if !title.is_empty() && name.to_lowercase().contains(&title.to_lowercase()) {
-                return Some(name);
-            }
-            if !artist.is_empty() && name.to_lowercase().contains(&artist.to_lowercase()) {
-                return Some(name);
-            }
-        }
-
-        None
-    }
+    best.map(|(n, _)| n)
 }
