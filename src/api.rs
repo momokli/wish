@@ -314,9 +314,16 @@ async fn resolve_via_ytdlp(
 async fn tracks(State(state): State<Arc<AppState>>) -> Result<Json<Vec<TrackItem>>, AppError> {
     let submissions = db::get_downloaded_submissions(&state.pool).await?;
 
+    // Build a set of known filenames from the DB
+    let mut db_files: std::collections::HashSet<String> = submissions
+        .iter()
+        .filter_map(|s| s.filename.clone())
+        .collect();
+
     let mut items = Vec::new();
 
-    for sub in submissions {
+    // First: files known in the DB
+    for sub in &submissions {
         if let Some(filename) = &sub.filename {
             let file_path = state.config.download.output_dir.join(filename);
             let size = tokio::fs::metadata(&file_path)
@@ -333,6 +340,31 @@ async fn tracks(State(state): State<Arc<AppState>>) -> Result<Json<Vec<TrackItem
                 url,
                 ready: sub.status == "ready",
             });
+        }
+    }
+
+    // Then: orphaned files on disk not yet in DB
+    if let Ok(mut entries) = tokio::fs::read_dir(&state.config.download.output_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let filename = entry.file_name().to_string_lossy().to_string();
+            if !filename.ends_with(".mp3")
+                && !filename.ends_with(".flac")
+                && !filename.ends_with(".m4a")
+            {
+                continue;
+            }
+            if db_files.contains(&filename) {
+                continue; // already listed above
+            }
+            if let Ok(meta) = entry.metadata().await {
+                let encoded = urlencoding::encode(&filename);
+                items.push(TrackItem {
+                    filename: filename.clone(),
+                    size: meta.len(),
+                    url: format!("/downloads/{}", encoded),
+                    ready: true,
+                });
+            }
         }
     }
 
@@ -357,20 +389,21 @@ async fn serve_download(
         return Err(AppError::BadRequest("Invalid filename".to_string()));
     }
 
-    // Verify the file is in the submissions table
+    // Verify the file is in the submissions table OR exists on disk
     let submissions = db::get_downloaded_submissions(&state.pool).await?;
     let matched = submissions
         .iter()
         .any(|s| s.filename.as_deref() == Some(filename_str));
 
-    if !matched {
-        return Err(AppError::NotFound("File not found".to_string()));
-    }
-
     let file_path = state.config.download.output_dir.join(filename_str);
 
+    // Allow serving if file exists on disk (even if not in DB)
     if !file_path.exists() {
         return Err(AppError::NotFound("File not found on disk".to_string()));
+    }
+
+    if !matched && !file_path.exists() {
+        return Err(AppError::NotFound("File not found".to_string()));
     }
 
     let file = tokio::fs::read(&file_path)
