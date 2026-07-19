@@ -1,8 +1,8 @@
 [package]
 name = "wish"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "Wedding/event song request server — guests submit Spotify links, tracks get downloaded for the DJ"
+description = "Song request server — guests submit links, tracks get downloaded for the DJ"
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
@@ -19,9 +19,15 @@ toml = "0.8"
 dirs = "6"
 dotenvy = "0.15"
 rust-embed = "8"
+urlencoding = "2"
+mime_guess = "2"
+which = "7"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 reqwest = { version = "0.12", features = ["json"] }
-rspotify = { version = "0.15", default-features = false, features = ["client-credentials", "reqwest-rustls-tls"] }
+rspotify = { version = "0.15", default-features = false, features = ["client-reqwest"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
+
+[dev-dependencies]
+tower = "0.5"

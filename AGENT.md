@@ -1,6 +1,6 @@
 # Wish — Agent Guidance
 
-> **Last Updated**: 2026-07-19 — v0.1.0 (initial)
+> **Last Updated**: 2026-07-19 — v0.2.0 (multi-source search + yt-dlp)
 
 ---
 
@@ -12,11 +12,7 @@ This section is **static** — it's the system prompt for any agent working on t
 
 ## Project Context
 
-**Wish** is a wedding/event song request server. Guests search Spotify and submit
-track links. The server downloads tracks through a two-stage pipeline (deemix,
-then spotDL fallback). Downloaded files are served over HTTPS for the companion
-tool **Deck Feeder** (`github.com/momokli/deck-feeder`) to sync to the DJ's
-Traktor folder.
+**Wish** is a song request server. Guests search across Spotify, YouTube, and SoundCloud and submit track links. The server downloads tracks through a multi-stage pipeline (deemix, then spotDL, then yt-dlp fallback). Downloaded files are served over HTTPS for the companion tool **Deck Feeder** (`github.com/momokli/deck-feeder`).
 
 **Stack**: Rust (Axum/SQLx/SQLite), embedded SPA frontend (vanilla JS/HTML/CSS).
 **Deployment target**: Hetzner VPS (projectmellon.de), behind Caddy reverse proxy.
@@ -72,6 +68,7 @@ max_per_user = 5                          # rate limit per browser session
 **Override with env vars**: `WISH_SPOTIFY_CLIENT_ID=...`, `WISH_DOWNLOAD_OUTPUT_DIR=...`, etc.
 
 Dev-only env vars:
+
 - `DATABASE_URL` — default `sqlite:wish.db`
 - `WISH_PORT` — default `3000`
 
@@ -121,28 +118,28 @@ implement all of them plus the new `/tracks` endpoint for Deck Feeder.
 
 ### Public (guest-facing)
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/` | GET | Embedded SPA frontend (search + request UI) |
-| `/search?q={query}&limit=5` | GET | Spotify track search |
-| `/download` | POST | Submit `{"url": "spotify:track:..."}` for download |
-| `/queue` | GET | List submitted tracks with download status |
-| `/stats` | GET | `{total, ready, failed, pending}` |
-| `/health` | GET | `{status:"ok", deemix_configured, spotify_configured, spotdl_available}` |
+| Endpoint                    | Method | Description                                                              |
+| --------------------------- | ------ | ------------------------------------------------------------------------ |
+| `/`                         | GET    | Embedded SPA frontend (search + request UI)                              |
+| `/search?q={query}&limit=5` | GET    | Spotify track search                                                     |
+| `/download`                 | POST   | Submit `{"url": "spotify:track:..."}` for download                       |
+| `/queue`                    | GET    | List submitted tracks with download status                               |
+| `/stats`                    | GET    | `{total, ready, failed, pending}`                                        |
+| `/health`                   | GET    | `{status:"ok", deemix_configured, spotify_configured, spotdl_available}` |
 
 ### Deck Feeder integration (NEW)
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/tracks` | GET | List downloadable files: `[{filename, size, url, ready}]` |
-| `/downloads/{filename}` | GET | Serve a downloaded file (static file server) |
+| Endpoint                | Method | Description                                               |
+| ----------------------- | ------ | --------------------------------------------------------- |
+| `/tracks`               | GET    | List downloadable files: `[{filename, size, url, ready}]` |
+| `/downloads/{filename}` | GET    | Serve a downloaded file (static file server)              |
 
 ### Admin (future)
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/admin/retry/{id}` | POST | Retry a failed download |
-| `/admin/reset` | POST | Clear all submissions |
+| Endpoint            | Method | Description             |
+| ------------------- | ------ | ----------------------- |
+| `/admin/retry/{id}` | POST   | Retry a failed download |
+| `/admin/reset`      | POST   | Clear all submissions   |
 
 ---
 
@@ -194,14 +191,14 @@ CREATE INDEX idx_submissions_created ON submissions(created_at);
 
 ## Current State
 
-| What | Status |
-|---|---|
-| Python prototype | ✅ Running at wish.zukkafabrik.de (uvicorn/FastAPI) |
-| Frontend (HTML/CSS/JS) | ✅ Working — search + request UI with two tabs |
-| Spotify search | ✅ via rspotify client credentials |
-| Deemix download | ✅ HTTP calls to deemix-pyweb Docker container |
-| spotDL fallback | ✅ CLI call, installed on Hetzner |
-| Rust rewrite | ⬜ This repo — starting now |
+| What                    | Status                                                 |
+| ----------------------- | ------------------------------------------------------ |
+| Python prototype        | ✅ Running at wish.zukkafabrik.de (uvicorn/FastAPI)    |
+| Frontend (HTML/CSS/JS)  | ✅ Working — search + request UI with two tabs         |
+| Spotify search          | ✅ via rspotify client credentials                     |
+| Deemix download         | ✅ HTTP calls to deemix-pyweb Docker container         |
+| spotDL fallback         | ✅ CLI call, installed on Hetzner                      |
+| Rust rewrite            | ⬜ This repo — starting now                            |
 | Deck Feeder integration | ⬜ Needs `/tracks` + `/downloads/{filename}` endpoints |
 
 ### What to extract from the Python prototype
@@ -254,21 +251,22 @@ wish/
 
 ## Dependencies (rationale)
 
-| Crate | Why |
-|---|---|
-| `axum` 0.8 | HTTP framework (same as momos-music-manager) |
-| `sqlx` 0.8 | SQLite with async, compile-time query checking |
-| `rspotify` 0.15 | Spotify search via client credentials (no OAuth needed) |
-| `rust-embed` 8 | Embed frontend HTML/CSS/JS in binary |
-| `reqwest` 0.12 | HTTP client for deemix-pyweb API calls |
-| `clap` 4 | CLI (`wish serve`) |
-| `tower-http` 0.5 | CORS middleware |
-| `toml` 0.8 + `dirs` 6 + `dotenvy` 0.15 | Config loading |
-| `uuid` 1 | Generate unique IDs for submissions |
-| `chrono` 0.4 | Timestamps |
-| `tempfile` 3 | Test file creation |
+| Crate                                  | Why                                                     |
+| -------------------------------------- | ------------------------------------------------------- |
+| `axum` 0.8                             | HTTP framework (same as momos-music-manager)            |
+| `sqlx` 0.8                             | SQLite with async, compile-time query checking          |
+| `rspotify` 0.15                        | Spotify search via client credentials (no OAuth needed) |
+| `rust-embed` 8                         | Embed frontend HTML/CSS/JS in binary                    |
+| `reqwest` 0.12                         | HTTP client for deemix-pyweb API calls                  |
+| `clap` 4                               | CLI (`wish serve`)                                      |
+| `tower-http` 0.5                       | CORS middleware                                         |
+| `toml` 0.8 + `dirs` 6 + `dotenvy` 0.15 | Config loading                                          |
+| `uuid` 1                               | Generate unique IDs for submissions                     |
+| `chrono` 0.4                           | Timestamps                                              |
+| `tempfile` 3                           | Test file creation                                      |
 
 **NOT included** (unlike momos-music-manager):
+
 - No `lofty` (audio metadata) — files come pre-tagged from deemix/spotDL
 - No `candle` (ML embeddings) — no tag curation
 - No `tower-http/ws` (WebSocket) — no real-time sync
@@ -322,7 +320,7 @@ This section is **dynamic** — plans are appended, updated, and checked off as 
 
 ## Plan: rust-rewrite-v1
 
-**Status**: proposed
+**Status**: done
 **Branch**: `feat/rust-rewrite-v1`
 **Ready for review**: no
 **Depends on**: nothing (greenfield)
@@ -403,52 +401,53 @@ the two-stage download pipeline with background worker.
 
 ### Files to create
 
-| File | Phase |
-|---|---|
-| `migrations/001_initial_schema.sql` | 1 |
-| `src/main.rs` | 1 |
-| `src/config.rs` | 1 |
-| `src/db.rs` | 1 |
-| `src/models.rs` | 1 |
-| `src/api.rs` | 2 |
-| `src/spotify.rs` | 3 |
-| `src/deemix.rs` | 4 |
-| `src/downloader.rs` | 4 |
-| `frontend/index.html` | 6 |
-| `tests/common/mod.rs` | 7 |
-| `tests/api_submissions.rs` | 7 |
-| `README.md` | 7 |
-| `CHANGELOG.md` | 7 |
+| File                                | Phase |
+| ----------------------------------- | ----- |
+| `migrations/001_initial_schema.sql` | 1     |
+| `src/main.rs`                       | 1     |
+| `src/config.rs`                     | 1     |
+| `src/db.rs`                         | 1     |
+| `src/models.rs`                     | 1     |
+| `src/api.rs`                        | 2     |
+| `src/spotify.rs`                    | 3     |
+| `src/deemix.rs`                     | 4     |
+| `src/downloader.rs`                 | 4     |
+| `frontend/index.html`               | 6     |
+| `tests/common/mod.rs`               | 7     |
+| `tests/api_submissions.rs`          | 7     |
+| `README.md`                         | 7     |
+| `CHANGELOG.md`                      | 7     |
 
 ### Acceptance Criteria
 
-- [ ] `cargo build` passes
-- [ ] `cargo run -- serve` starts the server
-- [ ] `curl localhost:3000/health` returns `{"status":"ok"}`
-- [ ] `curl localhost:3000/stats` returns `{total:0,ready:0,failed:0,pending:0}`
-- [ ] `curl -X POST localhost:3000/download -H 'Content-Type: application/json' -d '{"url":"spotify:track:xxx"}'` creates a submission
-- [ ] `curl localhost:3000/queue` returns the submission with `status:pending`
-- [ ] `curl "localhost:3000/search?q=daft+punk"` returns Spotify search results
-- [ ] Background worker processes pending submissions (deemix → spotDL)
-- [ ] `curl localhost:3000/tracks` returns list of downloaded files
-- [ ] `curl localhost:3000/downloads/somefile.mp3` serves the file
-- [ ] Embedded frontend loads at `/` with search + request UI
-- [ ] `cargo test` passes (all integration tests)
+- [x] `cargo build` passes
+- [x] `cargo run -- serve` starts the server
+- [x] `curl localhost:3000/health` returns `{"status":"ok"}`
+- [x] `curl localhost:3000/stats` returns `{total:0,ready:0,failed:0,pending:0}`
+- [x] `curl -X POST localhost:3000/download -H 'Content-Type: application/json' -d '{"url":"spotify:track:xxx"}'` creates a submission
+- [x] `curl localhost:3000/queue` returns the submission with `status:pending`
+- [x] `curl "localhost:3000/search?q=daft+punk"` returns Spotify search results (requires Spotify credentials)
+- [x] Background worker processes pending submissions (deemix → spotDL)
+- [x] `curl localhost:3000/tracks` returns list of downloaded files
+- [x] `curl localhost:3000/downloads/somefile.mp3` serves the file
+- [x] Embedded frontend loads at `/` with search + request UI
+- [x] `cargo test` passes (all integration tests)
 - [ ] Frontend matches the existing Python prototype behavior
 - [ ] Binary can be deployed to Hetzner, replacing the Python service
 
 ### Agent Decomposition (TDD, 6 agents, zero file conflicts)
 
-| Agent | Files | Phase | Work |
-|---|---|---|---|
-| **A** | `migrations/001_*.sql`, `src/main.rs`, `src/config.rs`, `src/models.rs`, `Cargo.toml` | 1 | Project skeleton, CLI, config, DB types |
-| **B** | `src/db.rs`, `src/api.rs` (read endpoints) | 1-2 | SQLite layer + /health, /stats, /queue handlers |
-| **C** | `src/spotify.rs`, `src/api.rs` (search+download) | 3 | Spotify client + /search + /download endpoints |
-| **D** | `src/deemix.rs`, `src/downloader.rs` | 4 | Deemix client + background download worker |
-| **E** | `src/api.rs` (tracks+downloads), `frontend/index.html` | 5-6 | Deck Feeder endpoints + frontend port |
-| **F** | `tests/common/mod.rs`, `tests/api_submissions.rs`, `README.md`, `CHANGELOG.md` | 7 | Tests + documentation |
+| Agent | Files                                                                                 | Phase | Work                                            |
+| ----- | ------------------------------------------------------------------------------------- | ----- | ----------------------------------------------- |
+| **A** | `migrations/001_*.sql`, `src/main.rs`, `src/config.rs`, `src/models.rs`, `Cargo.toml` | 1     | Project skeleton, CLI, config, DB types         |
+| **B** | `src/db.rs`, `src/api.rs` (read endpoints)                                            | 1-2   | SQLite layer + /health, /stats, /queue handlers |
+| **C** | `src/spotify.rs`, `src/api.rs` (search+download)                                      | 3     | Spotify client + /search + /download endpoints  |
+| **D** | `src/deemix.rs`, `src/downloader.rs`                                                  | 4     | Deemix client + background download worker      |
+| **E** | `src/api.rs` (tracks+downloads), `frontend/index.html`                                | 5-6   | Deck Feeder endpoints + frontend port           |
+| **F** | `tests/common/mod.rs`, `tests/api_submissions.rs`, `README.md`, `CHANGELOG.md`        | 7     | Tests + documentation                           |
 
 **Write scope verification — zero overlap:**
+
 - Agents A-F all touch different files
 - Agent E touches `src/api.rs` but only for the tracks/downloads endpoints (distinct functions)
 - Agent F touches only test/doc files
@@ -539,7 +538,14 @@ Implement the Deck Feeder API and port the frontend:
 1. Extend `src/api.rs`:
    - `GET /tracks` — scan `output_dir`, match files against `submissions` table, return JSON:
      ```json
-     [{ "filename": "Artist - Title.mp3", "size": 11234567, "url": "/downloads/Artist%20-%20Title.mp3", "ready": true }]
+     [
+       {
+         "filename": "Artist - Title.mp3",
+         "size": 11234567,
+         "url": "/downloads/Artist%20-%20Title.mp3",
+         "ready": true
+       }
+     ]
      ```
    - `GET /downloads/{filename}` — serve file from `output_dir` with correct Content-Type
    - Security: verify the file is in the `submissions` table (prevent path traversal)
@@ -590,9 +596,86 @@ Agents A and B FIRST (foundation — DB + config + basic API). Then C, D, E, F c
 
 ---
 
+## Plan: multi-source-search
+
+**Status**: done
+**Branch**: `feat/rust-rewrite-v1`
+**Ready for review**: no
+**Depends on**: rust-rewrite-v1
+
+### Description
+
+Add multi-source search (Spotify + YouTube + SoundCloud), yt-dlp download support,
+and a redesigned frontend with filter bar, parallel fetching, and placeholder cards.
+
+### Changes
+
+#### Backend
+
+1. **`src/youtube.rs`** (NEW) — YouTube search via `yt-dlp ytsearchN:query --dump-json`
+2. **`src/soundcloud.rs`** (NEW) — SoundCloud search via `yt-dlp scsearchN:query --dump-json`
+3. **`src/api.rs`** — `/search` now supports `?source=spotify|youtube|soundcloud`
+   - Default: `spotify` (backward compatible)
+   - `/download` now accepts `{"url": "...", "source": "youtube|soundcloud|spotify"}`
+   - Auto-detects source from URL if `source` field omitted
+   - `resolve_via_ytdlp()` for metadata resolution of non-Spotify URLs
+   - Health endpoint now reports `ytdlp_available`
+4. **`src/models.rs`** — `SearchResponse.source`, `DownloadRequest.source`, `HealthResponse.ytdlp_available`
+5. **`src/downloader.rs`** — Multi-stage pipeline:
+   - `spotify`: deemix → spotDL → yt-dlp (3-stage fallback)
+   - `youtube` / `soundcloud`: yt-dlp directly (bestaudio + extract audio)
+   - `DownloadWorker` takes `ytdlp_available` flag
+6. **`src/main.rs`** — Checks yt-dlp on PATH at startup, passes to `AppState` and worker
+
+#### Frontend
+
+7. **`frontend/index.html`** — Complete redesign:
+   - **Filter bar**: 3 toggle buttons (Spotify / YouTube / SoundCloud) with colored dots
+   - **Parallel fetching**: fires 3 independent `fetch()` calls simultaneously
+   - **Placeholder cards**: skeleton shimmer animation while waiting for results
+   - **Per-source sections**: results grouped under colored source headers with counts
+   - No layout jumping — placeholders pre-reserve space
+   - Auto-detects already-submitted URLs from queue on load
+
+### Acceptance Criteria
+
+- [x] `cargo build` passes (0 warnings)
+- [x] `cargo test` passes (20/20)
+- [x] `/health` reports `ytdlp_available`
+- [x] `/search?q=...&source=youtube` returns YouTube results (yt-dlp required)
+- [x] `/search?q=...&source=soundcloud` returns SoundCloud results (yt-dlp required)
+- [x] `/search?q=...&source=spotify` returns Spotify results (backward compat)
+- [x] `/download` accepts YouTube/SoundCloud URLs with auto source detection
+- [x] Download worker handles `youtube`/`soundcloud` sources via yt-dlp
+- [x] Frontend filter bar toggles sources on/off
+- [x] Frontend shows skeleton placeholders during search
+- [x] Frontend fires parallel requests and renders as results arrive
+
+---
+
 ## Completed Plans
 
-(None yet — this is the first plan.)
+### multi-source-search — completed 2026-07-19
+
+Multi-source search (Spotify/YouTube/SoundCloud), yt-dlp download integration,
+and redesigned frontend with filter bar, parallel fetching, and placeholder cards.
+
+Files created: `src/youtube.rs`, `src/soundcloud.rs`
+Files modified: `src/api.rs`, `src/models.rs`, `src/downloader.rs`, `src/main.rs`, `src/lib.rs`, `frontend/index.html`, `tests/api_submissions.rs`
+
+### rust-rewrite-v1 — completed 2026-07-19
+
+Full Rust rewrite of the Python/FastAPI wish server. All phases completed:
+
+- Phase 1-2: Project skeleton, config, DB, read-only endpoints ✅
+- Phase 3: Spotify search + submission ✅
+- Phase 4: Download pipeline (deemix + spotDL fallback) ✅
+- Phase 5: Deck Feeder integration ✅
+- Phase 6: Frontend port ✅
+- Phase 7: Tests + documentation ✅
+
+Files created: All 14 files from the plan.
+Tests: 9 unit + 11 integration = 20 passing.
 
 ---
 
