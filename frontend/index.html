@@ -547,6 +547,50 @@
                 background: rgba(239, 68, 68, 0.1);
                 color: var(--status-failed);
                 border: 1px solid rgba(239, 68, 68, 0.2);
+
+            /* ── DJ-ready banner ── */
+            .dj-ready-banner {
+                text-align: center;
+                padding: 10px 16px;
+                margin-bottom: 12px;
+                background: rgba(34,197,94,0.06);
+                border: 1px solid rgba(34,197,94,0.15);
+                border-radius: 8px;
+                font-family: var(--font-mono);
+                font-size: 11px;
+                color: var(--status-ready);
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+            }
+            .dj-ready-banner .count {
+                font-size: 18px;
+                font-weight: 700;
+                display: block;
+                margin-bottom: 2px;
+            }
+            .dj-badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 3px;
+                font-family: var(--font-mono);
+                font-size: 8px;
+                text-transform: uppercase;
+                color: var(--status-ready);
+                background: rgba(34,197,94,0.08);
+                border: 1px solid rgba(34,197,94,0.15);
+                padding: 1px 5px;
+                border-radius: 3px;
+                margin-left: 6px;
+            }
+            .dj-badge::before {
+                content: "\25CF";
+                font-size: 6px;
+                animation: dj-pulse 2s infinite;
+            }
+            @keyframes dj-pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.25; }
+            }
             }
 
             .bottom-nav {
@@ -1327,6 +1371,10 @@
                         if (!title) {
                             title = cleanUrl(url, source);
                         }
+                        // Extract artist from SoundCloud URL if missing
+                        if (!artist && url.indexOf("soundcloud.com/") !== -1) {
+                            artist = cleanArtist(url);
+                        }
 
                         var meta = "";
                         if (artist) meta += escHtml(artist) + " · ";
@@ -1425,6 +1473,26 @@
                     // Generic: truncate URL
                     if (url.length > 40) url = url.substring(0, 37) + "...";
                     return url;
+                }
+
+                // Extract artist name from SoundCloud URL slug
+                function cleanArtist(url) {
+                    // soundcloud.com/thehu-music/wolf-totem → "The Hu"
+                    var parts = url.replace(/\?.*$/, "").replace(/\/$/, "").split("/");
+                    if (parts.length >= 3) {
+                        var artistSlug = parts[parts.length - 2];
+                        return artistSlug
+                            .replace(/-/g, " ")
+                            .replace(/_/g, " ")
+                            .replace(/-music$/i, "")
+                            .replace(/\bofficial\b/gi, "")
+                            .replace(/\s+/g, " ")
+                            .trim()
+                            .replace(/\b\w/g, function (c) {
+                                return c.toUpperCase();
+                            });
+                    }
+                    return "";
                 }
 
                 function updatePillCount(source, count) {
