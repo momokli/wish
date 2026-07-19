@@ -757,6 +757,10 @@
                             <div class="stat-val" id="stat-pending">-</div>
                             <div class="stat-label">Pending</div>
                         </div>
+                        <div class="stat-box">
+                            <div class="stat-val" id="stat-failed">-</div>
+                            <div class="stat-label">Failed</div>
+                        </div>
                     </div>
                     <div id="queue-list" class="queue-list">
                         <div class="empty-state">Loading requests...</div>
@@ -1268,6 +1272,8 @@
                                 stats.ready || 0;
                             document.getElementById("stat-pending").textContent =
                                 stats.pending || 0;
+                            document.getElementById("stat-failed").textContent =
+                                stats.failed || 0;
 
                             if (stats.total > 0) {
                                 DOM.queueBadge.textContent = stats.total;
@@ -1311,9 +1317,24 @@
                     for (var i = 0; i < tasks.length; i++) {
                         var t = tasks[i];
                         var status = t.status || "pending";
-                        var title = t.title || t.track_title || "Downloading...";
+                        var title = t.title || null;
                         var artist = t.artist || t.track_artist || "";
                         var source = t.source || "";
+                        var url = t.spotify_url || "";
+                        var error = t.error_message || "";
+
+                        // Better fallback display for untitled tracks
+                        if (!title) {
+                            // Try to extract something useful from the URL
+                            var urlPart = url;
+                            if (urlPart.length > 50)
+                                urlPart = urlPart.substring(0, 47) + "...";
+                            title = urlPart || "Untitled " + (source || "track");
+                        }
+
+                        var meta = "";
+                        if (artist) meta += escHtml(artist) + " · ";
+                        if (source) meta += "[" + escHtml(source) + "]";
 
                         html +=
                             '<div class="queue-item">' +
@@ -1322,8 +1343,12 @@
                             escHtml(title) +
                             "</div>" +
                             '<div class="queue-meta">' +
-                            (artist ? escHtml(artist) + " \u00b7 " : "") +
-                            (source ? "[" + escHtml(source) + "]" : "") +
+                            meta +
+                            (status === "failed" && error
+                                ? '<br><span style="font-size:10px;color:var(--status-failed);opacity:0.7">' +
+                                  escHtml(error.substring(0, 120)) +
+                                  "</span>"
+                                : "") +
                             "</div>" +
                             "</div>" +
                             '<div class="queue-status status-' +
