@@ -1325,11 +1325,7 @@
 
                         // Better fallback display for untitled tracks
                         if (!title) {
-                            // Try to extract something useful from the URL
-                            var urlPart = url;
-                            if (urlPart.length > 50)
-                                urlPart = urlPart.substring(0, 47) + "...";
-                            title = urlPart || "Untitled " + (source || "track");
+                            title = cleanUrl(url, source);
                         }
 
                         var meta = "";
@@ -1382,6 +1378,53 @@
                         .replace(/"/g, "&quot;")
                         .replace(/</g, "&lt;")
                         .replace(/>/g, "&gt;");
+                }
+
+                // Extract a human-readable name from a music service URL
+                function cleanUrl(url, source) {
+                    if (!url) return "Untitled " + (source || "track");
+
+                    // SoundCloud: https://soundcloud.com/artist/track-name
+                    if (url.indexOf("soundcloud.com/") !== -1) {
+                        var parts = url
+                            .replace(/\?.*$/, "")
+                            .replace(/\/$/, "")
+                            .split("/");
+                        if (parts.length >= 2) {
+                            var slug = parts[parts.length - 1];
+                            // Humanize: wolf-totem → Wolf Totem, featuring → feat.
+                            return slug
+                                .replace(/-/g, " ")
+                                .replace(/_/g, " ")
+                                .replace(/\bfeat\b/gi, "feat.")
+                                .replace(/\bremix\b/gi, "Remix")
+                                .replace(/\bofficial\b/gi, "")
+                                .replace(/\bvideo\b/gi, "")
+                                .replace(/\blyrics?\b/gi, "")
+                                .replace(/\s+/g, " ")
+                                .trim()
+                                .replace(/\b\w/g, function (c) {
+                                    return c.toUpperCase();
+                                });
+                        }
+                    }
+
+                    // YouTube: https://www.youtube.com/watch?v=VIDEOID
+                    if (
+                        url.indexOf("youtube.com/") !== -1 ||
+                        url.indexOf("youtu.be/") !== -1
+                    ) {
+                        return "YouTube track";
+                    }
+
+                    // Spotify URI: spotify:track:ID
+                    if (url.indexOf("spotify:track:") === 0) {
+                        return "Spotify track";
+                    }
+
+                    // Generic: truncate URL
+                    if (url.length > 40) url = url.substring(0, 37) + "...";
+                    return url;
                 }
 
                 function updatePillCount(source, count) {
