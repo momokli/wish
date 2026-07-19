@@ -113,6 +113,32 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
 
     // Start the download worker in the background
     let deemix_client = wish::deemix::DeemixClient::new(config.deemix.base_url.clone());
+
+    // Authenticate with deemix if ARL is configured
+    if !config.deemix.arl.is_empty() {
+        match deemix_client.login_arl(&config.deemix.arl).await {
+            Ok(resp) => {
+                let name = resp.user.name.as_deref().unwrap_or("unknown");
+                let country = resp.user.country.as_deref().unwrap_or("?");
+                let lossless = resp.user.can_stream_lossless.unwrap_or(false);
+                tracing::info!(
+                    "Deemix authenticated as {} ({} / lossless: {})",
+                    name,
+                    country,
+                    lossless
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Deemix ARL login failed: {}. Downloads will skip deemix.",
+                    e
+                );
+            }
+        }
+    } else {
+        tracing::warn!("Deemix ARL not configured. Spotify downloads will skip deemix.");
+    }
+
     let worker = wish::downloader::DownloadWorker::new(
         pool.clone(),
         deemix_client,

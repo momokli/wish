@@ -72,9 +72,13 @@ async fn serve_frontend() -> impl IntoResponse {
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let spotdl_available = which::which("spotdl").is_ok();
 
+    // Quick check if deemix is authenticated (non-blocking)
+    let deemix_authenticated = !state.config.deemix.arl.is_empty();
+
     Json(HealthResponse {
         status: "ok".to_string(),
         deemix_configured: !state.config.deemix.base_url.is_empty(),
+        deemix_authenticated,
         spotify_configured: !state.config.spotify.client_id.is_empty(),
         spotdl_available,
         ytdlp_available: state.ytdlp_available,

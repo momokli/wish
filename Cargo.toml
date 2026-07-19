@@ -23,7 +23,7 @@ urlencoding = "2"
 mime_guess = "2"
 which = "7"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "cookies"] }
 rspotify = { version = "0.15", default-features = false, features = ["client-reqwest"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

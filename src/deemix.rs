@@ -1,6 +1,30 @@
 use anyhow::Context;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+// ── Models ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeemixLoginResponse {
+    pub status: i64,
+    pub arl: String,
+    pub user: DeemixUser,
+    pub childs: Vec<DeemixUser>,
+    #[serde(default)]
+    pub current_child: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeemixUser {
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub can_stream_lossless: Option<bool>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeemixQueueItem {
@@ -16,6 +40,16 @@ pub struct DeemixQueueItem {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct DeemixActionResult {
+    #[serde(default)]
+    result: bool,
+    #[serde(default)]
+    errid: Option<String>,
+}
+
+// ── Client ───────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone)]
 pub struct DeemixClient {
     base_url: String,
@@ -23,60 +57,95 @@ pub struct DeemixClient {
 }
 
 impl DeemixClient {
+    /// Create a new DeemixClient with cookie-based session support.
     pub fn new(base_url: String) -> Self {
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .build()
+            .expect("Failed to build reqwest client for DeemixClient");
+
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: Client::new(),
+            client,
         }
     }
 
-    /// Add a Spotify URL to the deemix download queue.
-    pub async fn add_to_queue(&self, spotify_url: &str) -> anyhow::Result<()> {
-        let url = format!("{}/api/addToQueue", self.base_url);
-
-        let body = serde_json::json!({
-            "url": spotify_url,
-        });
-
+    /// Authenticate with a Deezer ARL token.
+    /// POST `/api/loginArl` — returns user info on success.
+    pub async fn login_arl(&self, arl: &str) -> anyhow::Result<DeemixLoginResponse> {
+        let body = serde_json::json!({"status": 1, "arl": arl});
         let resp = self
             .client
-            .post(&url)
+            .post(format!("{}/api/loginArl", self.base_url))
             .json(&body)
             .send()
             .await
-            .with_context(|| format!("Failed to POST to deemix: {}", url))?;
+            .context("Failed to POST loginArl")?;
 
         let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Deemix addToQueue returned {}: {}", status, text);
+            anyhow::bail!("Deemix loginArl failed: {} {}", status, text);
         }
 
-        tracing::info!("Added to deemix queue: {}", spotify_url);
-        Ok(())
+        serde_json::from_str(&text).context("Failed to parse loginArl response")
+    }
+
+    /// Add a URL to the deemix download queue.
+    /// Returns Ok(()) on `result: true`, fails otherwise.
+    pub async fn add_to_queue(&self, url: &str) -> anyhow::Result<()> {
+        let body = serde_json::json!({"url": url});
+        let resp = self
+            .client
+            .post(format!("{}/api/addToQueue", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| "Failed to POST addToQueue")?;
+
+        let text = resp
+            .text()
+            .await
+            .context("Failed to read addToQueue body")?;
+
+        let result: DeemixActionResult = serde_json::from_str(&text)
+            .with_context(|| format!("Failed to parse addToQueue response: {}", text))?;
+
+        if result.result {
+            tracing::info!("Added to deemix queue: {}", url);
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "Deemix addToQueue failed: {}",
+                result.errid.as_deref().unwrap_or("unknown error")
+            );
+        }
     }
 
     /// Get the current deemix queue.
     pub async fn get_queue(&self) -> anyhow::Result<Vec<DeemixQueueItem>> {
-        let url = format!("{}/api/getQueue", self.base_url);
-
         let resp = self
             .client
-            .get(&url)
+            .get(format!("{}/api/getQueue", self.base_url))
             .send()
             .await
-            .with_context(|| format!("Failed to GET deemix queue: {}", url))?;
+            .context("Failed to GET getQueue")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Deemix getQueue returned {}: {}", status, text);
-        }
+        // Response is { "queue": { "uuid": { ... }, ... } }
+        let text = resp.text().await.context("Failed to read getQueue body")?;
+        let v: serde_json::Value =
+            serde_json::from_str(&text).context("Failed to parse getQueue response")?;
 
-        let items: Vec<DeemixQueueItem> = resp
-            .json()
-            .await
-            .context("Failed to parse deemix queue response")?;
+        let items: Vec<DeemixQueueItem> = v
+            .get("queue")
+            .and_then(|q| q.as_object())
+            .map(|obj| {
+                obj.values()
+                    .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(items)
     }
@@ -87,7 +156,7 @@ impl DeemixClient {
         Ok(queue.into_iter().find(|item| item.url == url))
     }
 
-    /// Poll until the item is done (ready or failed), with a timeout.
+    /// Poll until the item is done, with timeout in seconds.
     pub async fn poll_until_done(
         &self,
         url: &str,
@@ -105,19 +174,14 @@ impl DeemixClient {
 
             if let Some(item) = queue.into_iter().find(|item| item.url == url) {
                 match item.status.as_str() {
-                    "queued" | "downloading" | "converting" => {
+                    "queued" | "downloading" | "converting" | "processing" => {
                         tracing::debug!("Deemix status for {}: {}", url, item.status);
                         tokio::time::sleep(poll_interval).await;
-                        continue;
                     }
-                    _ => {
-                        // Done (finished, failed, error, etc.)
-                        return Ok(Some(item));
-                    }
+                    _ => return Ok(Some(item)),
                 }
             }
 
-            // Item not found in queue anymore, may have been processed
             tokio::time::sleep(poll_interval).await;
         }
     }

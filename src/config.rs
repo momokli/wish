@@ -14,6 +14,8 @@ pub struct SpotifyConfig {
 pub struct DeemixConfig {
     #[serde(default = "default_deemix_base_url")]
     pub base_url: String,
+    #[serde(default)]
+    pub arl: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -78,6 +80,9 @@ impl Config {
         if let Ok(val) = std::env::var("WISH_DEEMIX_BASE_URL") {
             config.deemix.base_url = val;
         }
+        if let Ok(val) = std::env::var("WISH_DEEMIX_ARL") {
+            config.deemix.arl = val;
+        }
         if let Ok(val) = std::env::var("WISH_DOWNLOAD_OUTPUT_DIR") {
             config.download.output_dir = PathBuf::from(val);
         }
@@ -119,6 +124,7 @@ impl Default for Config {
             },
             deemix: DeemixConfig {
                 base_url: default_deemix_base_url(),
+                arl: String::new(),
             },
             download: DownloadConfig {
                 output_dir: default_output_dir(),

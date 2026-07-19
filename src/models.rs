@@ -89,6 +89,7 @@ pub struct StatsResponse {
 pub struct HealthResponse {
     pub status: String,
     pub deemix_configured: bool,
+    pub deemix_authenticated: bool,
     pub spotify_configured: bool,
     pub spotdl_available: bool,
     pub ytdlp_available: bool,
