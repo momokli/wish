@@ -1,0 +1,27 @@
+[package]
+name = "wish"
+version = "0.1.0"
+edition = "2024"
+description = "Wedding/event song request server — guests submit Spotify links, tracks get downloaded for the DJ"
+
+[dependencies]
+axum = { version = "0.8", features = ["multipart"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
+dotenvy = "0.15"
+rust-embed = "8"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+reqwest = { version = "0.12", features = ["json"] }
+rspotify = { version = "0.15", default-features = false, features = ["client-credentials", "reqwest-rustls-tls"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3"
