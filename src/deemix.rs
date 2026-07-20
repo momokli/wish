@@ -174,16 +174,17 @@ impl DeemixClient {
 
             let queue = self.get_queue().await?;
 
-            // Find by URL, or if queue has exactly 1 item, use that
+            // Find by URL, or grab any terminal item as fallback
             let item = queue
                 .iter()
                 .find(|item| item.url.as_deref() == Some(url))
                 .or_else(|| {
-                    if queue.len() == 1 {
-                        queue.first()
-                    } else {
-                        None
-                    }
+                    queue.iter().find(|i| {
+                        !matches!(
+                            i.status.as_str(),
+                            "queued" | "downloading" | "converting" | "processing"
+                        )
+                    })
                 })
                 .cloned();
 
