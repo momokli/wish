@@ -5,6 +5,7 @@ deemix_arl: "{{ lookup('env', 'WISH_DEEMIX_ARL') | default('', true) }}"
 
 # Paths
 wish_home: /home/momo/wish
+cargo_home: /home/momo/.cargo
 wish_user: momo
 wish_port: 8700
 dufs_port: 8321
