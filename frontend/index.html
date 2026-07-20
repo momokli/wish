@@ -524,6 +524,15 @@
                 color: var(--text-muted);
             }
 
+            .fail-reason {
+                display: inline-block;
+                font-size: 10px;
+                color: var(--status-failed);
+                opacity: 0.65;
+                margin-top: 2px;
+                line-height: 1.3;
+            }
+
             .queue-status {
                 font-family: var(--font-mono);
                 font-size: 10px;
@@ -547,14 +556,15 @@
                 background: rgba(239, 68, 68, 0.1);
                 color: var(--status-failed);
                 border: 1px solid rgba(239, 68, 68, 0.2);
+            }
 
             /* ── DJ-ready banner ── */
             .dj-ready-banner {
                 text-align: center;
                 padding: 10px 16px;
                 margin-bottom: 12px;
-                background: rgba(34,197,94,0.06);
-                border: 1px solid rgba(34,197,94,0.15);
+                background: rgba(34, 197, 94, 0.06);
+                border: 1px solid rgba(34, 197, 94, 0.15);
                 border-radius: 8px;
                 font-family: var(--font-mono);
                 font-size: 11px;
@@ -576,8 +586,8 @@
                 font-size: 8px;
                 text-transform: uppercase;
                 color: var(--status-ready);
-                background: rgba(34,197,94,0.08);
-                border: 1px solid rgba(34,197,94,0.15);
+                background: rgba(34, 197, 94, 0.08);
+                border: 1px solid rgba(34, 197, 94, 0.15);
                 padding: 1px 5px;
                 border-radius: 3px;
                 margin-left: 6px;
@@ -588,54 +598,13 @@
                 animation: dj-pulse 2s infinite;
             }
             @keyframes dj-pulse {
-                0%, 100% { opacity: 1; }
-                50% { opacity: 0.25; }
-            }
-            }
-
-
-            /* ── DJ-ready banner ── */
-            .dj-ready-banner {
-                text-align: center;
-                padding: 10px 16px;
-                margin-bottom: 12px;
-                background: rgba(34,197,94,0.06);
-                border: 1px solid rgba(34,197,94,0.15);
-                border-radius: 8px;
-                font-family: var(--font-mono);
-                font-size: 11px;
-                color: var(--status-ready);
-                text-transform: uppercase;
-                letter-spacing: 0.08em;
-            }
-            .dj-ready-banner .count {
-                font-size: 18px;
-                font-weight: 700;
-                display: block;
-                margin-bottom: 2px;
-            }
-            .dj-badge {
-                display: inline-flex;
-                align-items: center;
-                gap: 3px;
-                font-family: var(--font-mono);
-                font-size: 8px;
-                text-transform: uppercase;
-                color: var(--status-ready);
-                background: rgba(34,197,94,0.08);
-                border: 1px solid rgba(34,197,94,0.15);
-                padding: 1px 5px;
-                border-radius: 3px;
-                margin-left: 6px;
-            }
-            .dj-badge::before {
-                content: '\25CF';
-                font-size: 6px;
-                animation: dj-pulse 2s infinite;
-            }
-            @keyframes dj-pulse {
-                0%, 100% { opacity: 1; }
-                50% { opacity: 0.25; }
+                0%,
+                100% {
+                    opacity: 1;
+                }
+                50% {
+                    opacity: 0.25;
+                }
             }
             .bottom-nav {
                 position: absolute;
@@ -1404,9 +1373,16 @@
                     var html = "";
 
                     /* ── DJ-ready banner ── */
-                    var readyCount = tasks.filter(function(t) { return t.status === "ready"; }).length;
+                    var readyCount = tasks.filter(function (t) {
+                        return t.status === "ready";
+                    }).length;
                     if (readyCount > 0) {
-                        html += '<div class="dj-ready-banner"><span class="count">' + readyCount + '</span>track' + (readyCount > 1 ? 's' : '') + ' ready for the DJ</div>';
+                        html +=
+                            '<div class="dj-ready-banner"><span class="count">' +
+                            readyCount +
+                            "</span>track" +
+                            (readyCount > 1 ? "s" : "") +
+                            " ready for the DJ</div>";
                     }
                     for (var i = 0; i < tasks.length; i++) {
                         var t = tasks[i];
@@ -1417,11 +1393,9 @@
                         var url = t.spotify_url || "";
                         var error = t.error_message || "";
 
-                        // Better fallback display for untitled tracks
                         if (!title) {
                             title = cleanUrl(url, source);
                         }
-                        // Extract artist from SoundCloud URL if missing
                         if (!artist && url.indexOf("soundcloud.com/") !== -1) {
                             artist = cleanArtist(url);
                         }
@@ -1429,6 +1403,9 @@
                         var meta = "";
                         if (artist) meta += escHtml(artist) + " · ";
                         if (source) meta += "[" + escHtml(source) + "]";
+
+                        // Short, human-readable error reason
+                        var errReason = shortError(error, source);
 
                         html +=
                             '<div class="queue-item">' +
@@ -1438,9 +1415,9 @@
                             "</div>" +
                             '<div class="queue-meta">' +
                             meta +
-                            (status === "failed" && error
-                                ? '<br><span style="font-size:10px;color:var(--status-failed);opacity:0.7">' +
-                                  escHtml(error.substring(0, 120)) +
+                            (errReason
+                                ? '<br><span class="fail-reason">' +
+                                  escHtml(errReason) +
                                   "</span>"
                                 : "") +
                             "</div>" +
@@ -1449,7 +1426,9 @@
                             status +
                             '">' +
                             escHtml(status.replace(/_/g, " ")) +
-                            (status === "ready" ? '<span class="dj-badge">DJ</span>' : '') +
+                            (status === "ready"
+                                ? '<span class="dj-badge">DJ</span>'
+                                : "") +
                             "</div>" +
                             "</div>";
                     }
@@ -1477,6 +1456,40 @@
                         .replace(/"/g, "&quot;")
                         .replace(/</g, "&lt;")
                         .replace(/>/g, "&gt;");
+                }
+
+                // Extract a short, human-readable reason from a verbose error message
+                function shortError(err, source) {
+                    if (!err) return "";
+                    var e = err.toLowerCase();
+
+                    if (
+                        e.indexOf("sign in to confirm") !== -1 ||
+                        e.indexOf("not a bot") !== -1
+                    )
+                        return "YouTube blocked this request (needs auth cookies)";
+                    if (e.indexOf("drm protected") !== -1)
+                        return "Track is DRM protected and cannot be downloaded";
+                    if (e.indexOf("404") !== -1 || e.indexOf("not found") !== -1)
+                        return "Track not found on " + source;
+                    if (
+                        e.indexOf("all stages exhausted") !== -1 ||
+                        e.indexOf("all failed") !== -1
+                    )
+                        return "Could not download from any source";
+                    if (e.indexOf("spotdl succeeded but couldn't find") !== -1)
+                        return "Downloaded but file was lost";
+                    if (e.indexOf("failed after 3 attempts") !== -1)
+                        return "Download failed after 3 tries";
+                    if (e.indexOf("java") !== -1) return "SpotDL needs Java installed";
+
+                    // Fallback: first meaningful line
+                    var lines = err.split(/[\n\r]+/).filter(function (l) {
+                        return l.trim().length > 10;
+                    });
+                    var short = lines[lines.length - 1] || err.substring(0, 80);
+                    if (short.length > 100) short = short.substring(0, 97) + "...";
+                    return short;
                 }
 
                 // Extract a human-readable name from a music service URL
@@ -1524,26 +1537,6 @@
                     // Generic: truncate URL
                     if (url.length > 40) url = url.substring(0, 37) + "...";
                     return url;
-                }
-
-                // Extract artist name from SoundCloud URL slug
-                function cleanArtist(url) {
-                    // soundcloud.com/thehu-music/wolf-totem → "The Hu"
-                    var parts = url.replace(/\?.*$/, "").replace(/\/$/, "").split("/");
-                    if (parts.length >= 3) {
-                        var artistSlug = parts[parts.length - 2];
-                        return artistSlug
-                            .replace(/-/g, " ")
-                            .replace(/_/g, " ")
-                            .replace(/-music$/i, "")
-                            .replace(/\bofficial\b/gi, "")
-                            .replace(/\s+/g, " ")
-                            .trim()
-                            .replace(/\b\w/g, function (c) {
-                                return c.toUpperCase();
-                            });
-                    }
-                    return "";
                 }
 
                 function updatePillCount(source, count) {
