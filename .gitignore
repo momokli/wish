@@ -3,3 +3,6 @@
 *.db-shm
 *.db-wal
 .env
+
+# Ansible
+ansible/group_vars/secrets.yml

@@ -1,0 +1,18 @@
+[Unit]
+Description=Wish Song Request Server (Rust)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ wish_user }}
+WorkingDirectory={{ wish_home }}
+Environment=WISH_PORT={{ wish_port }}
+Environment=DATABASE_URL=sqlite:{{ wish_home }}/wish.db?mode=rwc
+Environment=PATH={{ wish_home }}/.cargo/bin:{{ venv_path }}/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart={{ wish_home }}/target/release/wish serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

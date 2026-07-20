@@ -1,0 +1,357 @@
+---
+# Wish — full deployment playbook for projectmellon.de
+#
+# Usage:
+#   ansible-playbook -i inventory.yml playbook.yml
+#
+# With secrets from env:
+#   WISH_SPOTIFY_CLIENT_ID=... WISH_SPOTIFY_CLIENT_SECRET=... WISH_DEEMIX_ARL=... \
+#     ansible-playbook -i inventory.yml playbook.yml
+
+- name: Deploy Wish backend on projectmellon.de
+  hosts: all
+  become: yes
+
+  # ── Pre-flight checks ───────────────────────────────────────────
+  pre_tasks:
+    - name: Verify secrets are set
+      ansible.builtin.assert:
+        that:
+          - spotify_client_id | length > 0
+          - spotify_client_secret | length > 0
+          - deemix_arl | length > 0
+        fail_msg: |
+          Missing secrets! Set them via environment variables:
+            WISH_SPOTIFY_CLIENT_ID=...
+            WISH_SPOTIFY_CLIENT_SECRET=...
+            WISH_DEEMIX_ARL=...
+      tags: [always]
+
+  # ═══════════════════════════════════════════════════════════════════
+  # 1. SYSTEM DEPENDENCIES
+  # ═══════════════════════════════════════════════════════════════════
+
+  tasks:
+    - name: Install system packages
+      ansible.builtin.apt:
+        name:
+          - nodejs          # yt-dlp needs JS runtime for YouTube bot challenges
+          - python3
+          - python3-pip
+          - git
+          - rsync
+        state: present
+        update_cache: yes
+      tags: [deps]
+
+    - name: Install/upgrade yt-dlp and spotdl via pip
+      ansible.builtin.pip:
+        name:
+          - yt-dlp
+          - spotdl
+        state: latest
+        virtualenv: "{{ venv_path }}"
+        virtualenv_command: python3 -m venv
+      tags: [deps]
+
+    - name: Symlink yt-dlp and spotdl into PATH
+      ansible.builtin.file:
+        src: "{{ venv_path }}/bin/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        state: link
+      loop: [yt-dlp, spotdl]
+      tags: [deps]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 2. USER & DIRECTORIES
+    # ═══════════════════════════════════════════════════════════════════
+
+    - name: Ensure wish user exists
+      ansible.builtin.user:
+        name: "{{ wish_user }}"
+        state: present
+        shell: /bin/bash
+      tags: [user]
+
+    - name: Create directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ wish_user }}"
+        group: "{{ wish_user }}"
+        mode: "0755"
+      loop:
+        - "{{ wish_home }}"
+        - "{{ wish_home }}/src"
+        - "{{ wish_home }}/frontend"
+        - "{{ wish_home }}/migrations"
+        - "{{ wish_home }}/tests"
+        - "{{ download_dir }}"
+        - "{{ wish_home }}/.cargo"
+      tags: [dirs]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 3. DEEMIX (Docker container)
+    # ═══════════════════════════════════════════════════════════════════
+
+    - name: Ensure Docker is available
+      ansible.builtin.command: docker --version
+      changed_when: false
+      tags: [deemix]
+
+    - name: Pull deemix Docker image
+      community.docker.docker_image:
+        name: "{{ deemix_image }}"
+        source: pull
+      tags: [deemix]
+
+    - name: Stop existing deemix container
+      community.docker.docker_container:
+        name: deemix
+        state: absent
+      tags: [deemix]
+
+    - name: Start deemix container (without ARL — login happens via API)
+      community.docker.docker_container:
+        name: deemix
+        image: "{{ deemix_image }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "127.0.0.1:{{ deemix_port }}:6595"
+        volumes:
+          - "{{ download_dir }}:/downloads"
+          - "deemix-config:/config"
+      tags: [deemix]
+
+    - name: Configure deemix — 320kbps MP3 + Spotify plugin
+      ansible.builtin.copy:
+        dest: "/var/lib/docker/volumes/deemix-config/_data/config.json"
+        owner: "{{ wish_user }}"
+        mode: "0644"
+        content: |
+          {
+            "downloadLocation": "/downloads",
+            "maxBitrate": "3",
+            "fallbackBitrate": true,
+            "createAlbumFolder": false,
+            "createSingleFolder": false,
+            "spotifyPlugin": true,
+            "queueConcurrency": 3
+          }
+      notify: restart deemix
+      tags: [deemix]
+
+    - name: Configure deemix Spotify credentials
+      ansible.builtin.copy:
+        dest: "/var/lib/docker/volumes/deemix-config/_data/spotify/config.json"
+        owner: "{{ wish_user }}"
+        mode: "0644"
+        content: |
+          {
+            "clientId": "{{ spotify_client_id }}",
+            "clientSecret": "{{ spotify_client_secret }}",
+            "fallbackSearch": false
+          }
+      notify: restart deemix
+      tags: [deemix]
+
+    - name: Authenticate deemix with ARL
+      ansible.builtin.uri:
+        url: "http://localhost:{{ deemix_port }}/api/loginArl"
+        method: POST
+        body_format: json
+        body:
+          status: 1
+          arl: "{{ deemix_arl }}"
+        status_code: 200
+      register: deemix_login
+      retries: 5
+      delay: 3
+      until: deemix_login is success
+      tags: [deemix]
+
+    - name: Log deemix auth result
+      ansible.builtin.debug:
+        msg: "Deemix authenticated as {{ deemix_login.json.user.name }} ({{ deemix_login.json.user.country }})"
+      tags: [deemix]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 4. WISH SERVER (Rust binary + systemd)
+    # ═══════════════════════════════════════════════════════════════════
+
+    - name: Deploy wish source code
+      ansible.builtin.synchronize:
+        src: "{{ playbook_dir }}/../"
+        dest: "{{ wish_home }}/"
+        rsync_opts:
+          - "--exclude=target/"
+          - "--exclude=.git/"
+          - "--exclude=*.db"
+          - "--exclude=*.db-shm"
+          - "--exclude=*.db-wal"
+          - "--exclude=.env"
+          - "--exclude=downloads/"
+          - "--exclude=ansible/"
+        owner: no
+        group: no
+      tags: [wish, deploy]
+
+    - name: Install Rust (if not present)
+      ansible.builtin.shell: |
+        if ! command -v cargo &>/dev/null; then
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        fi
+      args:
+        executable: /bin/bash
+      become_user: "{{ wish_user }}"
+      tags: [wish]
+
+    - name: Build wish release binary
+      ansible.builtin.shell: |
+        export PATH="{{ wish_home }}/.cargo/bin:{{ venv_path }}/bin:$PATH"
+        cargo build --release
+      args:
+        chdir: "{{ wish_home }}"
+        executable: /bin/bash
+      become_user: "{{ wish_user }}"
+      environment:
+        PATH: "{{ wish_home }}/.cargo/bin:{{ venv_path }}/bin:/usr/local/bin:/usr/bin:/bin"
+      tags: [wish, deploy]
+
+    - name: Deploy wish config
+      ansible.builtin.template:
+        src: wish.config.toml.j2
+        dest: "{{ wish_home }}/.config/wish/config.toml"
+        owner: "{{ wish_user }}"
+        group: "{{ wish_user }}"
+        mode: "0600"
+      notify: restart wish
+      tags: [wish, config]
+
+    - name: Install wish systemd service
+      ansible.builtin.template:
+        src: wish.service.j2
+        dest: /etc/systemd/system/wish.service
+        mode: "0644"
+      notify: restart wish
+      tags: [wish, systemd]
+
+    - name: Enable and start wish
+      ansible.builtin.systemd:
+        name: wish
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      tags: [wish]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 5. DUFS (file server for Deck Feeder)
+    # ═══════════════════════════════════════════════════════════════════
+
+    - name: Install dufs
+      ansible.builtin.shell: |
+        cargo install dufs
+      args:
+        executable: /bin/bash
+      become_user: "{{ wish_user }}"
+      environment:
+        PATH: "{{ wish_home }}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+      tags: [dufs]
+
+    - name: Create dufs systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/dufs.service
+        content: |
+          [Unit]
+          Description=Dufs File Server for Wish
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ wish_user }}
+          ExecStart={{ wish_home }}/.cargo/bin/dufs {{ download_dir }} --port {{ dufs_port }} --allow-all
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+      notify: restart dufs
+      tags: [dufs]
+
+    - name: Enable and start dufs
+      ansible.builtin.systemd:
+        name: dufs
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      tags: [dufs]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 6. CADDY (reverse proxy — only if Caddyfile is managed here)
+    # ═══════════════════════════════════════════════════════════════════
+    # Note: projectmellon.de already has a Caddy Docker container.
+    # This section updates the Caddyfile routes for wish.
+
+    - name: Update Caddy routes for wish
+      ansible.builtin.shell: |
+        docker exec mellon-caddy sh -c 'cat > /tmp/wish-routes << CADDYEOF
+        wish.zukkafabrik.de {
+            reverse_proxy 127.0.0.1:{{ wish_port }}
+        }
+        files.wish.zukkafabrik.de {
+            reverse_proxy 127.0.0.1:{{ dufs_port }}
+        }
+        CADDYEOF
+        '
+      changed_when: false
+      tags: [caddy]
+      # Note: actual Caddy config depends on the existing setup.
+      # If the Caddyfile is managed elsewhere, skip this task.
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 7. HEALTH CHECK
+    # ═══════════════════════════════════════════════════════════════════
+
+    - name: Wait for wish to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:{{ wish_port }}/health"
+        status_code: 200
+      register: health
+      retries: 10
+      delay: 2
+      until: health is success
+      tags: [verify]
+
+    - name: Show deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "✅ wish: http://localhost:{{ wish_port }} — {{ health.json.status }}"
+          - "✅ deemix: http://localhost:{{ deemix_port }} — authenticated: {{ health.json.deemix_authenticated }}"
+          - "✅ yt-dlp: {{ health.json.ytdlp_available }}"
+          - "✅ spotDL: {{ health.json.spotdl_available }}"
+          - "✅ dufs: http://localhost:{{ dufs_port }}"
+          - ""
+          - "🌐 https://wish.zukkafabrik.de"
+          - "📁 https://files.wish.zukkafabrik.de"
+      tags: [verify]
+
+  # ── Handlers ────────────────────────────────────────────────────
+
+  handlers:
+    - name: restart deemix
+      community.docker.docker_container:
+        name: deemix
+        state: restarted
+
+    - name: restart wish
+      ansible.builtin.systemd:
+        name: wish
+        state: restarted
+        daemon_reload: yes
+
+    - name: restart dufs
+      ansible.builtin.systemd:
+        name: dufs
+        state: restarted
+        daemon_reload: yes
