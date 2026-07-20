@@ -864,7 +864,6 @@
             (function () {
                 var API = window.location.origin;
                 var EVENT = localStorage.getItem("wish_event_name") || "wish";
-                var MAX_WANTS = parseInt(localStorage.getItem("wish_max") || "5");
 
                 document.getElementById("event-name").textContent = EVENT;
                 document.title = EVENT;
@@ -876,7 +875,6 @@
                     wantedUrls: JSON.parse(
                         localStorage.getItem("wish_wanted_urls") || "[]",
                     ),
-                    maxWants: MAX_WANTS,
                     searchTimeout: null,
                     abortControllers: {},
                     // Cache: { query: "...", results: { spotify: [...], youtube: [...], soundcloud: [...] }, ts: Date.now() }
@@ -1280,20 +1278,6 @@
                     var url = btn.dataset.url;
                     var source = btn.dataset.source;
                     var title = btn.dataset.title;
-
-                    if (state.wantedUrls.length >= state.maxWants - 0) {
-                        // Count from localStorage too
-                        var stored = JSON.parse(
-                            localStorage.getItem("wish_wanted_urls") || "[]",
-                        );
-                        if (stored.length >= state.maxWants) {
-                            showToast(
-                                "Limit reached! Max " + state.maxWants + " songs.",
-                                "error",
-                            );
-                            return;
-                        }
-                    }
 
                     var orig = btn.textContent;
                     btn.textContent = "...";
