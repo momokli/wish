@@ -43,7 +43,36 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Deck Feeder integration
         .route("/tracks", get(tracks))
         .route("/downloads/{filename}", get(serve_download))
+        // Admin
+        .route("/admin", get(serve_admin))
+        .route("/admin/data", get(admin_data))
         .with_state(state)
+}
+
+// ─── Admin ────────────────────────────────────────────────────────
+
+async fn serve_admin() -> impl IntoResponse {
+    match FrontendAssets::get("admin.html") {
+        Some(file) => Response::builder()
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(file.data))
+            .unwrap(),
+        None => (
+            StatusCode::NOT_FOUND,
+            "Admin page not found. Place admin.html in frontend/",
+        )
+            .into_response(),
+    }
+}
+
+async fn admin_data(State(state): State<Arc<AppState>>) -> Result<Json<Vec<AdminRow>>, AppError> {
+    let rows = sqlx::query_as::<_, AdminRow>(
+        "SELECT id, track_title, track_artist, spotify_url, source, status, filename, file_size, error_message, bitrate, container, attempts_json, created_at, updated_at FROM submissions ORDER BY created_at DESC"
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| AppError::Internal(format!("DB error: {e}")))?;
+    Ok(Json(rows))
 }
 
 // ─── Frontend ────────────────────────────────────────────────────

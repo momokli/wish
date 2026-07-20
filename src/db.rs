@@ -5,15 +5,16 @@ use crate::models::{StatsResponse, Submission};
 
 /// Run all SQL migrations in order.
 pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
-    // Embedded migration: read from migrations/ directory at build time.
-    // For now, we embed the migration SQL directly since we're reading from files.
-    let migration = include_str!("../migrations/001_initial_schema.sql");
-
-    sqlx::query(migration)
-        .execute(pool)
-        .await
-        .context("Failed to run migrations")?;
-
+    let migrations = [
+        include_str!("../migrations/001_initial_schema.sql"),
+        include_str!("../migrations/002_admin_fields.sql"),
+    ];
+    for m in migrations {
+        sqlx::query(m)
+            .execute(pool)
+            .await
+            .context("Failed to run migration")?;
+    }
     tracing::info!("Migrations applied successfully");
     Ok(())
 }

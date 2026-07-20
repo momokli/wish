@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>wish — admin</title>
+<style>
+:root { --bg:#0c0a09; --card:#1c1917; --border:#292524; --text:#d6d3d1; --muted:#78716c; --green:#22c55e; --amber:#f59e0b; --red:#ef4444; --mono:"Courier New",monospace; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font:13px var(--mono); padding:24px; }
+h1 { font:normal 20px Georgia,serif; color:#fff; margin-bottom:4px; }
+.sub { color:var(--muted); font-size:11px; margin-bottom:20px; }
+.toolbar { display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; align-items:center; }
+.toolbar button, .toolbar select { background:var(--card); border:1px solid var(--border); color:var(--text); padding:6px 12px; font:11px var(--mono); cursor:pointer; border-radius:4px; }
+.toolbar button:hover, .toolbar select:hover { border-color:var(--muted); }
+.toolbar .active { background:#1a2e1a; border-color:var(--green); color:var(--green); }
+table { width:100%; border-collapse:collapse; }
+th { text-align:left; padding:8px 10px; font-size:10px; text-transform:uppercase; color:var(--muted); border-bottom:1px solid var(--border); cursor:pointer; user-select:none; white-space:nowrap; }
+th:hover { color:#fff; }
+th.sorted::after { content:" ▾"; color:var(--green); }
+td { padding:8px 10px; border-bottom:1px solid var(--border); font-size:12px; white-space:nowrap; }
+tr:hover { background:rgba(255,255,255,0.02); }
+tr.expanded td { border-bottom:none; }
+.status { display:inline-block; padding:2px 8px; border-radius:3px; font-size:10px; font-weight:bold; text-transform:uppercase; }
+.status.ready { background:rgba(34,197,94,0.1); color:var(--green); border:1px solid rgba(34,197,94,0.2); }
+.status.failed { background:rgba(239,68,68,0.1); color:var(--red); border:1px solid rgba(239,68,68,0.2); }
+.status.pending, .status.stage2_deemix, .status.stage3_spotdl { background:rgba(245,158,11,0.1); color:var(--amber); border:1px solid rgba(245,158,11,0.2); }
+.logs-row { display:none; }
+tr.expanded + .logs-row { display:table-row; }
+.logs-cell { padding:0 10px 12px 10px; font-size:11px; color:var(--muted); }
+.logs-cell .log-entry { padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.03); }
+.logs-cell .log-entry:last-child { border:none; }
+.log-entry .ts { color:var(--muted); margin-right:8px; }
+.log-entry .layer { color:var(--green); }
+.log-entry .error { color:var(--red); }
+#refresh { margin-left:auto; color:var(--muted); font-size:10px; }
+a { color:var(--text); text-decoration:none; }
+a:hover { color:#fff; }
+</style>
+</head>
+<body>
+<h1>wish admin</h1>
+<p class="sub">Technical view — all requests with download details</p>
+
+<div class="toolbar">
+    <button class="active" data-filter="all">All</button>
+    <button data-filter="ready">Ready</button>
+    <button data-filter="failed">Failed</button>
+    <button data-filter="pending">Pending</button>
+    <span id="refresh">auto 10s</span>
+</div>
+
+<table>
+<thead>
+<tr>
+    <th data-sort="id">#</th>
+    <th data-sort="track_title">Title</th>
+    <th data-sort="track_artist">Artist</th>
+    <th data-sort="source">Source</th>
+    <th data-sort="status">Status</th>
+    <th>Bitrate</th>
+    <th>Container</th>
+    <th data-sort="file_size">Size</th>
+    <th data-sort="filename">File</th>
+    <th>Error</th>
+</tr>
+</thead>
+<tbody id="tbody"></tbody>
+</table>
+
+<script>
+var API = window.location.origin;
+var filter = "all", sortCol = "id", sortDir = "desc", data = [];
+
+function fmtsize(b) { if (!b) return ""; if (b>1e6) return (b/1e6).toFixed(1)+"MB"; return (b/1024).toFixed(0)+"KB"; }
+function fmterr(e) { if (!e) return ""; if (e.indexOf("downloaded via ")==0) return '<span style="color:var(--green)">'+e+'</span>'; var s=e.substring(0,80); return s+(e.length>80?"...":""); }
+
+document.querySelectorAll("[data-filter]").forEach(function(b) {
+    b.addEventListener("click",function(){
+        document.querySelectorAll("[data-filter]").forEach(function(x){x.classList.remove("active")});
+        b.classList.add("active");
+        filter = b.dataset.filter;
+        render();
+    });
+});
+
+document.querySelectorAll("[data-sort]").forEach(function(th) {
+    th.addEventListener("click",function(){
+        document.querySelectorAll("th").forEach(function(x){x.classList.remove("sorted")});
+        th.classList.add("sorted");
+        var col = th.dataset.sort;
+        if (sortCol === col) sortDir = sortDir === "asc" ? "desc" : "asc";
+        else { sortCol = col; sortDir = "asc"; }
+        render();
+    });
+});
+
+function render() {
+    var filtered = data;
+    if (filter !== "all") {
+        if (filter === "pending") filtered = data.filter(function(r){ return r.status !== "ready" && r.status !== "failed"; });
+        else filtered = data.filter(function(r){ return r.status === filter; });
+    }
+    filtered.sort(function(a,b){
+        var va = a[sortCol] || "", vb = b[sortCol] || "";
+        if (typeof va === "number") return sortDir === "asc" ? va-vb : vb-va;
+        return sortDir === "asc" ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+    });
+    var h = "";
+    for (var i=0; i<filtered.length; i++) {
+        var r = filtered[i], s = r.status || "pending", sc = s.replace(/_/g," ");
+        var title = r.track_title || cleanUrl(r.spotify_url||"", r.source||"");
+        var err = fmterr(r.error_message);
+        var logs = [];
+        try { if (r.attempts_json) logs = JSON.parse(r.attempts_json); } catch(e) {}
+        h += '<tr onclick="this.classList.toggle(\"expanded\")">'+
+            '<td>'+r.id+'</td>'+
+            '<td>'+esc(title)+'</td>'+
+            '<td>'+esc(r.track_artist||"")+'</td>'+
+            '<td>'+esc(r.source||"")+'</td>'+
+            '<td><span class="status '+s+'">'+sc+'</span></td>'+
+            '<td>'+esc(r.bitrate||"")+'</td>'+
+            '<td>'+esc(r.container||"")+'</td>'+
+            '<td>'+fmtsize(r.file_size)+'</td>'+
+            '<td><a href="/downloads/'+encodeURIComponent(r.filename||"")+'">'+(r.filename||"").substring(0,40)+'</a></td>'+
+            '<td>'+err+'</td>'+
+            '</tr>';
+        if (logs.length) {
+            h += '<tr class="logs-row"><td colspan="10"><div class="logs-cell">';
+            for (var j=0; j<logs.length; j++) {
+                var l = logs[j];
+                h += '<div class="log-entry"><span class="ts">'+l.ts+'</span>';
+                if (l.ok) h += '<span class="layer">✅ '+l.layer+'</span> → '+l.file+' ('+l.bitrate+' '+l.container+')';
+                else h += '<span class="error">❌ '+l.layer+'</span> — '+l.error;
+                h += '</div>';
+            }
+            h += '</div></td></tr>';
+        }
+    }
+    document.getElementById("tbody").innerHTML = h || '<tr><td colspan="10" style="color:var(--muted);text-align:center;padding:40px;">No submissions found</td></tr>';
+}
+
+function fetchData() {
+    fetch(API + "/admin/data")
+        .then(function(r){ return r.json(); })
+        .then(function(d){ data = d; render(); document.getElementById("refresh").textContent = "auto 10s · "+data.length+" rows"; })
+        .catch(function(){});
+}
+
+function esc(s) { var d=document.createElement("div"); d.textContent = (s||"").toString(); return d.innerHTML; }
+
+function cleanUrl(url, source) {
+    if (!url) return "?";
+    if (url.indexOf("soundcloud.com/")!==-1) { var p=url.replace(/\?.*$/,"").split("/"); return p[p.length-1].replace(/-/g," ").replace(/_/g," "); }
+    if (url.indexOf("youtube.com/")!==-1||url.indexOf("youtu.be/")!==-1) return "YouTube track";
+    if (url.indexOf("spotify:track:")===0) return "Spotify track";
+    return url.length>40 ? url.substring(0,37)+"..." : url;
+}
+
+fetchData();
+setInterval(fetchData, 10000);
+</script>
+</body>
+</html>

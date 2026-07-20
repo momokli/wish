@@ -743,6 +743,60 @@ frontend correctly displays download sources. TDD: test first, fix second.
 - [x] `curl https://wish.zukkafabrik.de/health` shows all services available
 - [x] No file copying — all services write to same directory
 
+## Plan: admin-view
+
+**Status**: in-progress
+**Branch**: `feat/rust-rewrite-v1`
+**Depends on**: full-pipeline-verification
+
+### Description
+
+Add an `/admin` page with a technical table of all submissions — IDs, URLs,
+status, bitrate, container, file size, download source, per-track attempt logs.
+Built in two phases: MVP → POC.
+
+### MVP: Basic admin table
+
+#### Backend
+
+1. **Migration `002_admin_fields.sql`** — add columns:
+   - `bitrate` TEXT (e.g. "320kbps", "lossless")
+   - `container` TEXT (e.g. "mp3", "flac", "m4a")
+   - `attempts_json` TEXT (JSON array of attempt logs)
+
+2. **`src/api.rs`** — `/admin` endpoint serves embedded admin HTML
+   - `/admin/data` — JSON endpoint returning all submissions with full details
+
+3. **`src/downloader.rs`** — after each download attempt, append to `attempts_json`
+   - On success: record `{"layer": "yt-dlp", "file": "...", "bitrate": "...", "container": "mp3"}`
+   - Detect container from file extension, attempt bitrate from yt-dlp output
+
+#### Frontend
+
+4. **`frontend/admin.html`** — standalone admin page (separate from guest SPA):
+   - Dark-themed table: ID, Title, Artist, Source, Status, Bitrate, Container, Size, Via
+   - Filter by status (ready/failed/pending)
+   - Sort by any column
+   - Auto-refresh every 10s
+   - Click row → expand to show attempt logs
+
+### POC: Full admin with attempt timeline
+
+5. Store per-attempt details: command output, timing, errors
+6. Admin: timeline view showing each download attempt as a row
+7. Export as CSV
+
+### Agent Decomposition
+
+| Agent | Files                                                           | Work                                                                                         |
+| ----- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **A** | `migrations/002_admin_fields.sql`, `src/db.rs`, `src/models.rs` | DB migration, new columns, insert/update helpers                                             |
+| **B** | `src/downloader.rs`                                             | Record attempt details (bitrate, container, attempt_json) in try_spotdl/run_ytdlp/try_deemix |
+| **C** | `src/api.rs`                                                    | `/admin` + `/admin/data` endpoints, serve embedded admin.html                                |
+| **D** | `frontend/admin.html`                                           | Admin table UI with filtering, sorting, auto-refresh                                         |
+
+**Execution order**: A first (DB), then B+C+D in parallel.
+
 ---
 
 ## Completed Plans

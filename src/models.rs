@@ -19,6 +19,9 @@ pub struct Submission {
     pub filename: Option<String>,
     pub file_size: Option<i64>,
     pub error_message: Option<String>,
+    pub bitrate: Option<String>,
+    pub container: Option<String>,
+    pub attempts_json: Option<String>,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
 }
@@ -56,6 +59,25 @@ impl From<Submission> for SubmissionResponse {
             created_at: s.created_at,
         }
     }
+}
+
+/// Full admin view of a submission with all technical details.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct AdminRow {
+    pub id: i64,
+    pub track_title: Option<String>,
+    pub track_artist: Option<String>,
+    pub spotify_url: String,
+    pub source: String,
+    pub status: String,
+    pub filename: Option<String>,
+    pub file_size: Option<i64>,
+    pub error_message: Option<String>,
+    pub bitrate: Option<String>,
+    pub container: Option<String>,
+    pub attempts_json: Option<String>,
+    pub created_at: Option<i64>,
+    pub updated_at: Option<i64>,
 }
 
 /// A Spotify search result.

@@ -217,6 +217,7 @@ async fn try_spotdl(
         .to_string_lossy()
         .to_string();
     for a in 1..=MAX_RETRIES {
+        tracing::info!("[{}] spotDL {a}/{MAX_RETRIES}", sub.id);
         let o = tokio::process::Command::new("spotdl")
             .args([
                 "download",
@@ -226,6 +227,8 @@ async fn try_spotdl(
                 "--bitrate",
                 "320k",
                 "--no-overwrites",
+                "--yt-dlp-path",
+                "/usr/local/bin/yt-dlp",
             ])
             .output()
             .await?;
@@ -233,13 +236,20 @@ async fn try_spotdl(
             if let Some(f) = newest(dir).await {
                 return done(pool, dir, sub.id, &f, "spotDL").await;
             }
-            anyhow::bail!("no output");
+            tracing::warn!("[{}] spotDL OK but no output file", sub.id);
+        } else {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            tracing::warn!(
+                "[{}] spotDL {a} failed: {}",
+                sub.id,
+                stderr.lines().last().unwrap_or("")
+            );
         }
         if a < MAX_RETRIES {
             tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(a - 1))).await;
         }
     }
-    anyhow::bail!("spotDL failed");
+    anyhow::bail!("spotDL failed after {MAX_RETRIES} attempts");
 }
 
 async fn run_ytdlp(

@@ -9,11 +9,15 @@ pub async fn create_test_db() -> SqlitePool {
         .expect("Failed to create test DB");
 
     // Run migrations
-    let migration = include_str!("../../migrations/001_initial_schema.sql");
-    sqlx::query(migration)
-        .execute(&pool)
-        .await
-        .expect("Failed to run migrations");
+    for m in [
+        include_str!("../../migrations/001_initial_schema.sql"),
+        include_str!("../../migrations/002_admin_fields.sql"),
+    ] {
+        sqlx::query(m)
+            .execute(&pool)
+            .await
+            .expect("Failed to run migration");
+    }
 
     pool
 }
