@@ -79,7 +79,7 @@
         state: directory
         owner: "{{ wish_user }}"
         group: "{{ wish_user }}"
-        mode: "0755"
+        mode: "0777"
       loop:
         - "{{ wish_home }}"
         - "{{ wish_home }}/src"

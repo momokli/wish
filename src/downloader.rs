@@ -122,8 +122,8 @@ async fn process_one(
                 fail(&pool, id, "yt-dlp not available").await;
             }
         }
-        "youtube" | "soundcloud" => {
-            // Prefer ytsearch1: with metadata — avoids YouTube bot detection on direct URLs
+        "youtube" => {
+            // Use ytsearch1: with metadata — avoids YouTube bot detection on direct URLs
             let query = if let (Some(t), Some(a)) =
                 (sub.track_title.as_deref(), sub.track_artist.as_deref())
             {
@@ -133,6 +133,13 @@ async fn process_one(
             };
             let tmpl = dir.join("%(artist)s - %(title)s [%(id)s].%(ext)s");
             if let Err(e) = run_ytdlp(&pool, &dir, id, &tmpl, &query).await {
+                fail(&pool, id, &e.to_string()).await;
+            }
+        }
+        "soundcloud" => {
+            // Direct URL — SoundCloud doesn't need ytsearch1:
+            let tmpl = dir.join("%(artist)s - %(title)s [%(id)s].%(ext)s");
+            if let Err(e) = run_ytdlp(&pool, &dir, id, &tmpl, url).await {
                 fail(&pool, id, &e.to_string()).await;
             }
         }
@@ -313,15 +320,22 @@ async fn newest(dir: &Path) -> Option<String> {
         let mut entries = tokio::fs::read_dir(&d).await.ok()?;
         while let Ok(Some(entry)) = entries.next_entry().await {
             let ft = entry.file_type().await.ok()?;
-            if ft.is_dir() { dirs.push_back(entry.path()); continue; }
+            if ft.is_dir() {
+                dirs.push_back(entry.path());
+                continue;
+            }
             let n = entry.file_name().to_string_lossy().to_string();
-            if !n.ends_with(".mp3") && !n.ends_with(".flac") && !n.ends_with(".m4a") { continue; }
+            if !n.ends_with(".mp3") && !n.ends_with(".flac") && !n.ends_with(".m4a") {
+                continue;
+            }
             if let Ok(meta) = entry.metadata().await {
                 if let Ok(mt) = meta.modified() {
                     // Store path relative to output dir so done() can find it
                     if let Ok(rel) = entry.path().strip_prefix(dir) {
                         let rel_str = rel.to_string_lossy().to_string();
-                        if best.as_ref().map_or(true, |(_, p)| mt > *p) { best = Some((rel_str, mt)); }
+                        if best.as_ref().map_or(true, |(_, p)| mt > *p) {
+                            best = Some((rel_str, mt));
+                        }
                     }
                 }
             }
