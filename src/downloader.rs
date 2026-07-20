@@ -250,13 +250,20 @@ async fn run_ytdlp(
         let o = tokio::process::Command::new("yt-dlp")
             .args([
                 "-x",
-                "--audio-format", "mp3",
-                "--audio-quality", "0",
-                "--embed-metadata", "--embed-thumbnail",
-                "--no-playlist", "--no-overwrites",
-                "--cookies", "/home/momo/wish/cookies-youtube.txt",
-                "--print", "after_move:filepath",
-                "-o", &t,
+                "--audio-format",
+                "mp3",
+                "--audio-quality",
+                "0",
+                "--embed-metadata",
+                "--embed-thumbnail",
+                "--no-playlist",
+                "--no-overwrites",
+                "--cookies",
+                "/home/momo/wish/cookies-youtube.txt",
+                "--print",
+                "after_move:filepath",
+                "-o",
+                &t,
                 url,
             ])
             .output()
@@ -278,9 +285,9 @@ async fn run_ytdlp(
         let stderr = String::from_utf8_lossy(&o.stderr);
         let reason = reason(&stderr);
         if a < MAX_RETRIES {
-            let d = std::time::Duration::from_secs(2u64.pow(a - 1));
-            tracing::warn!("[{id}] yt-dlp {a} failed: {reason} ({d:?})");
-            tokio::time::sleep(d).await;
+            let delay = std::time::Duration::from_secs(2u64.pow(a - 1));
+            tracing::warn!("[{id}] yt-dlp {a} failed ({delay:?}): {reason} | raw: {stderr}");
+            tokio::time::sleep(delay).await;
         } else {
             anyhow::bail!("{reason}");
         }
