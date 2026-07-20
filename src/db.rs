@@ -172,6 +172,49 @@ pub async fn get_pending_submissions(pool: &SqlitePool) -> anyhow::Result<Vec<Su
     Ok(submissions)
 }
 
+/// Append a download attempt to the attempts_json column.
+pub async fn append_attempt(
+    pool: &SqlitePool,
+    id: i64,
+    layer: &str,
+    ok: bool,
+    filename: Option<&str>,
+    bitrate: Option<&str>,
+    container: Option<&str>,
+    error: Option<&str>,
+) -> anyhow::Result<()> {
+    let entry = serde_json::json!({
+        "ts": chrono::Utc::now().format("%H:%M:%S").to_string(),
+        "layer": layer,
+        "ok": ok,
+        "file": filename,
+        "bitrate": bitrate,
+        "container": container,
+        "error": error,
+    });
+    let entry_str = entry.to_string();
+
+    // Append to existing JSON array, or create new one
+    sqlx::query(
+        "UPDATE submissions SET attempts_json = CASE
+            WHEN attempts_json IS NULL THEN json_array(?1)
+            ELSE json_insert(attempts_json, '$[#]', json(?1))
+        END,
+        bitrate = COALESCE(?2, bitrate),
+        container = COALESCE(?3, container)
+        WHERE id = ?4",
+    )
+    .bind(&entry_str)
+    .bind(bitrate)
+    .bind(container)
+    .bind(id)
+    .execute(pool)
+    .await
+    .context("Failed to append attempt")?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

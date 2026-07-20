@@ -345,14 +345,28 @@ async fn done(
         .await
         .ok()
         .map(|m| m.len() as i64);
+    let container = name.split('.').last().map(|e| e.to_lowercase());
     let note = format!("downloaded via {stage}");
     db::update_submission_status(pool, id, "ready", Some(name), sz, Some(&note)).await?;
+    // Record attempt
+    let _ = db::append_attempt(
+        pool,
+        id,
+        stage,
+        true,
+        Some(name),
+        None,
+        container.as_deref(),
+        None,
+    )
+    .await;
     tracing::info!("[{id}] ready [{stage}] {name}");
     Ok(())
 }
 
 async fn fail(pool: &SqlitePool, id: i64, reason: &str) {
     let _ = db::update_submission_status(pool, id, "failed", None, None, Some(reason)).await;
+    let _ = db::append_attempt(pool, id, "all", false, None, None, None, Some(reason)).await;
     tracing::error!("[{id}] FAILED: {reason}");
 }
 
