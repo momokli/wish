@@ -182,7 +182,10 @@ async fn try_deemix(
     dir: &Path,
     sub: &crate::models::Submission,
 ) -> anyhow::Result<()> {
-    let _ = db::update_submission_status(pool, sub.id, "stage2_deemix", None, None, None).await;
+    // Don't reset status if track already has a file (upgrade path)
+    if sub.filename.is_none() {
+        let _ = db::update_submission_status(pool, sub.id, "stage2_deemix", None, None, None).await;
+    }
     deemix.add_to_queue(&sub.spotify_url).await?;
     match deemix.poll_until_done(&sub.spotify_url, 300).await {
         Ok(Some(item))
@@ -206,7 +209,9 @@ async fn try_spotdl(
     dir: &Path,
     sub: &crate::models::Submission,
 ) -> anyhow::Result<()> {
-    let _ = db::update_submission_status(pool, sub.id, "stage3_spotdl", None, None, None).await;
+    if sub.filename.is_none() {
+        let _ = db::update_submission_status(pool, sub.id, "stage3_spotdl", None, None, None).await;
+    }
     let fmt = dir
         .join("{title} - {artists}.{ext}")
         .to_string_lossy()
