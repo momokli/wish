@@ -151,7 +151,11 @@ async fn try_deemix(
     let _ = db::update_submission_status(pool, sub.id, "stage2_deemix", None, None, None).await;
     deemix.add_to_queue(&sub.spotify_url).await?;
     match deemix.poll_until_done(&sub.spotify_url, 300).await {
-        Ok(Some(item)) if item.status == "finished" || item.status == "downloaded" => {
+        Ok(Some(item))
+            if item.status == "finished"
+                || item.status == "downloaded"
+                || item.status == "completed" =>
+        {
             if let Some(f) = newest(dir).await {
                 return done(pool, dir, sub.id, &f, "deemix").await;
             }
@@ -300,17 +304,25 @@ async fn fail(pool: &SqlitePool, id: i64, reason: &str) {
 }
 
 async fn newest(dir: &Path) -> Option<String> {
-    let mut e = tokio::fs::read_dir(dir).await.ok()?;
+    use std::collections::VecDeque;
     let mut best: Option<(String, std::time::SystemTime)> = None;
-    while let Ok(Some(entry)) = e.next_entry().await {
-        let n = entry.file_name().to_string_lossy().to_string();
-        if !n.ends_with(".mp3") {
-            continue;
-        }
-        if let (Ok(m), _) = (entry.metadata().await, entry.metadata().await) {
-            if let Ok(t) = m.modified() {
-                if best.as_ref().map_or(true, |(_, p)| t > *p) {
-                    best = Some((n, t));
+    let mut dirs = VecDeque::new();
+    dirs.push_back(dir.to_path_buf());
+
+    while let Some(d) = dirs.pop_front() {
+        let mut entries = tokio::fs::read_dir(&d).await.ok()?;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let ft = entry.file_type().await.ok()?;
+            if ft.is_dir() { dirs.push_back(entry.path()); continue; }
+            let n = entry.file_name().to_string_lossy().to_string();
+            if !n.ends_with(".mp3") && !n.ends_with(".flac") && !n.ends_with(".m4a") { continue; }
+            if let Ok(meta) = entry.metadata().await {
+                if let Ok(mt) = meta.modified() {
+                    // Store path relative to output dir so done() can find it
+                    if let Ok(rel) = entry.path().strip_prefix(dir) {
+                        let rel_str = rel.to_string_lossy().to_string();
+                        if best.as_ref().map_or(true, |(_, p)| mt > *p) { best = Some((rel_str, mt)); }
+                    }
                 }
             }
         }
