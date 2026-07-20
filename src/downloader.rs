@@ -260,6 +260,8 @@ async fn run_ytdlp(
                 "--no-overwrites",
                 "--cookies",
                 "/home/momo/wish/cookies-youtube.txt",
+                "--proxy",
+                "socks5://127.0.0.1:1080",
                 "--print",
                 "after_move:filepath",
                 "-o",
