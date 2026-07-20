@@ -99,11 +99,24 @@ async fn process_one(
 
     match src {
         "spotify" => {
-            // L1: deemix → L2: spotDL → L3: yt-dlp
-            if try_deemix(&pool, &deemix, &dir, &sub).await.is_ok() {
-                return;
-            }
+            // L1: spotDL (fast, no ARL needed) → L2: yt-dlp → L3: deemix (quality upgrade)
             if try_spotdl(&pool, &dir, &sub).await.is_ok() {
+                // Spawn background deemix upgrade for better quality
+                if ytdlp {
+                    // already got a file, try deemix as quality boost
+                    let p2 = pool.clone();
+                    let d2 = deemix.clone();
+                    let dir2 = dir.clone();
+                    let s2 = sub.clone();
+                    tokio::spawn(async move {
+                        if try_deemix(&p2, &d2, &dir2, &s2).await.is_ok() {
+                            tracing::info!(
+                                "[{}] deemix upgrade: replaced spotDL file with higher quality",
+                                s2.id
+                            );
+                        }
+                    });
+                }
                 return;
             }
             if ytdlp {
@@ -112,15 +125,29 @@ async fn process_one(
                 {
                     let q = format!("ytsearch1:{a} - {t}");
                     let tmpl = dir.join("%(artist)s - %(title)s [%(id)s].%(ext)s");
-                    if let Err(e) = run_ytdlp(&pool, &dir, id, &tmpl, &q).await {
-                        fail(&pool, id, &e.to_string()).await;
+                    if run_ytdlp(&pool, &dir, id, &tmpl, &q).await.is_ok() {
+                        // Spawn background deemix upgrade
+                        let p2 = pool.clone();
+                        let d2 = deemix.clone();
+                        let dir2 = dir.clone();
+                        let s2 = sub.clone();
+                        tokio::spawn(async move {
+                            if try_deemix(&p2, &d2, &dir2, &s2).await.is_ok() {
+                                tracing::info!(
+                                    "[{}] deemix upgrade: replaced yt-dlp file with higher quality",
+                                    s2.id
+                                );
+                            }
+                        });
+                        return;
                     }
-                } else {
-                    fail(&pool, id, "no metadata for search").await;
                 }
-            } else {
-                fail(&pool, id, "yt-dlp not available").await;
             }
+            // L3: deemix as last resort (slow, needs ARL)
+            if try_deemix(&pool, &deemix, &dir, &sub).await.is_ok() {
+                return;
+            }
+            fail(&pool, id, "spotDL + yt-dlp + deemix all failed").await;
         }
         "youtube" => {
             // Use ytsearch1: with metadata — avoids YouTube bot detection on direct URLs
@@ -223,18 +250,13 @@ async fn run_ytdlp(
         let o = tokio::process::Command::new("yt-dlp")
             .args([
                 "-x",
-                "--audio-format",
-                "mp3",
-                "--audio-quality",
-                "0",
-                "--embed-metadata",
-                "--embed-thumbnail",
-                "--no-playlist",
-                "--no-overwrites",
-                "--print",
-                "after_move:filepath",
-                "-o",
-                &t,
+                "--audio-format", "mp3",
+                "--audio-quality", "0",
+                "--embed-metadata", "--embed-thumbnail",
+                "--no-playlist", "--no-overwrites",
+                "--cookies", "/home/momo/wish/cookies-youtube.txt",
+                "--print", "after_move:filepath",
+                "-o", &t,
                 url,
             ])
             .output()
