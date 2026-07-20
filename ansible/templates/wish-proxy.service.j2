@@ -1,0 +1,14 @@
+[Unit]
+Description=SSH SOCKS5 proxy tunnel for wish yt-dlp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -N -D 1080 -p 9999 momo@localhost
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
