@@ -288,7 +288,8 @@ async fn done(
         .await
         .ok()
         .map(|m| m.len() as i64);
-    db::update_submission_status(pool, id, "ready", Some(name), sz, None).await?;
+    let note = format!("downloaded via {stage}");
+    db::update_submission_status(pool, id, "ready", Some(name), sz, Some(&note)).await?;
     tracing::info!("[{id}] ready [{stage}] {name}");
     Ok(())
 }

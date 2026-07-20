@@ -533,6 +533,15 @@
                 line-height: 1.3;
             }
 
+            .via-badge {
+                display: inline-block;
+                font-size: 10px;
+                color: var(--status-ready);
+                opacity: 0.8;
+                margin-top: 2px;
+                line-height: 1.3;
+            }
+
             .queue-status {
                 font-family: var(--font-mono);
                 font-size: 10px;
@@ -1404,7 +1413,15 @@
                         if (artist) meta += escHtml(artist) + " · ";
                         if (source) meta += "[" + escHtml(source) + "]";
 
-                        // Short, human-readable error reason
+                        // Show download source for ready tracks, error for failed
+                        var via = "";
+                        if (
+                            status === "ready" &&
+                            error.indexOf("downloaded via ") === 0
+                        ) {
+                            via = error;
+                            error = "";
+                        }
                         var errReason = shortError(error, source);
 
                         html +=
@@ -1415,6 +1432,11 @@
                             "</div>" +
                             '<div class="queue-meta">' +
                             meta +
+                            (via
+                                ? '<br><span class="via-badge">' +
+                                  escHtml(via) +
+                                  "</span>"
+                                : "") +
                             (errReason
                                 ? '<br><span class="fail-reason">' +
                                   escHtml(errReason) +
