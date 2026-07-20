@@ -1,6 +1,6 @@
 # Wish — Agent Guidance
 
-> **Last Updated**: 2026-07-19 — v0.2.0 (multi-source search + yt-dlp)
+> **Last Updated**: 2026-07-20 — v0.6.0 (ansible deploy + full pipeline verification)
 
 ---
 
@@ -653,7 +653,104 @@ and a redesigned frontend with filter bar, parallel fetching, and placeholder ca
 
 ---
 
+## Plan: full-pipeline-verification
+
+**Status**: done
+**Branch**: `feat/rust-rewrite-v1`
+**Ready for review**: no
+**Depends on**: multi-source-search, deemix-auth
+
+### Description
+
+End-to-end verification that ALL providers work, ALL fallbacks function,
+the download pipeline is correct, dufs file serving is correct, and the
+frontend correctly displays download sources. TDD: test first, fix second.
+
+### Verification Checklist
+
+#### Infrastructure
+
+- [x] `files.wish.zukkafabrik.de` serves from the SAME directory as wish/deemix
+- [x] No file copying between dirs — single `/opt/download-service/downloads`
+- [x] Deemix download dir is stable (duplicate downloads auto-skipped)
+
+#### Download Pipeline — Spotify
+
+- [x] Spotify track → L1 deemix downloads at 320kbps (or FLAC fallback)
+- [x] If deemix fails → L2 spotDL attempts download
+- [x] If spotDL fails → L3 yt-dlp searches and downloads
+- [x] DB shows `"downloaded via deemix"` (or spotDL / yt-dlp)
+- [x] Frontend shows green via-badge with correct source
+- [x] File appears on disk in `/opt/download-service/downloads`
+- [x] File visible at `https://files.wish.zukkafabrik.de/<filename>`
+
+#### Download Pipeline — YouTube
+
+- [x] YouTube URL → yt-dlp downloads directly
+- [x] Uses `ytsearch1:Artist - Title` to avoid bot detection
+- [x] DB shows `"downloaded via yt-dlp"`
+- [x] Frontend shows green via-badge
+
+#### Download Pipeline — SoundCloud
+
+- [x] SoundCloud URL → yt-dlp downloads directly
+- [x] DB shows `"downloaded via yt-dlp"`
+
+#### Search
+
+- [x] Spotify search returns results
+- [x] YouTube search returns results (yt-dlp ytsearchN)
+- [x] SoundCloud search returns results (yt-dlp scsearchN)
+- [x] Filter bar toggles show/hide without re-searching
+- [x] Cache avoids re-fetching same query
+
+#### Frontend
+
+- [x] Requests tab shows all submissions with status
+- [x] Ready tracks show "downloaded via <source>" in green
+- [x] Failed tracks show short error reason in red
+- [x] Stat boxes show Total / Ready / Pending / Failed
+- [x] Track titles display human-readable fallbacks for null metadata
+
+#### Deemix Configuration
+
+- [x] Spotify URLs submitted directly to deemix (`add_to_queue`)
+- [x] 320kbps MP3 configured (`maxBitrate: "3"`)
+- [x] Bitrate fallback enabled
+- [x] Spotify plugin enabled + client credentials set
+- [x] ARL authenticated
+
+### Agent Decomposition
+
+| Agent | File(s)      | Work                                                                                |
+| ----- | ------------ | ----------------------------------------------------------------------------------- |
+| **A** | (infra)      | ✅ Verify dufs serves from same dir, test file URLs work, verify no copying         |
+| **B** | (spotify)    | ✅ Reset DB, submit Spotify track, verify L1→L2→L3 fallback, check "downloaded via" |
+| **C** | (youtube)    | ✅ Reset DB, submit YouTube track, verify yt-dlp direct download with ytsearch1:    |
+| **D** | (soundcloud) | ✅ Reset DB, submit SoundCloud track, verify yt-dlp download                        |
+| **E** | (frontend)   | ✅ Verify search results, filter toggles, requests tab rendering, via-badges        |
+| **F** | (deemix)     | ✅ Verify Spotify URL → deemix directly, config correctness, ARL auth               |
+
+**Execution order**: A first (infra), then B/C/D in parallel (downloads), E+F can run anytime.
+
+### Acceptance Criteria
+
+- [x] `files.wish.zukkafabrik.de` shows downloaded files
+- [x] Spotify download succeeds through at least one layer, shows "downloaded via <layer>"
+- [x] YouTube download succeeds, shows "downloaded via yt-dlp"
+- [x] SoundCloud download succeeds (or fails gracefully with clear reason)
+- [x] Frontend shows all results correctly
+- [x] `curl https://wish.zukkafabrik.de/health` shows all services available
+- [x] No file copying — all services write to same directory
+
+---
+
 ## Completed Plans
+
+### full-pipeline-verification — completed 2026-07-20
+
+End-to-end verification of all providers, fallback pipeline, dufs file serving,
+and frontend display. Fixed SoundCloud routing bug and directory permissions.
 
 ### multi-source-search — completed 2026-07-19
 

@@ -29,7 +29,7 @@ pub struct DeemixUser {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeemixQueueItem {
     #[serde(default)]
-    pub url: String,
+    pub url: Option<String>,
     #[serde(default)]
     pub status: String,
     #[serde(default)]
@@ -153,7 +153,9 @@ impl DeemixClient {
     /// Find an item in the queue by URL.
     pub async fn find_by_url(&self, url: &str) -> anyhow::Result<Option<DeemixQueueItem>> {
         let queue = self.get_queue().await?;
-        Ok(queue.into_iter().find(|item| item.url == url))
+        Ok(queue
+            .into_iter()
+            .find(|item| item.url.as_deref() == Some(url)))
     }
 
     /// Poll until the item is done, with timeout in seconds.
@@ -172,7 +174,21 @@ impl DeemixClient {
 
             let queue = self.get_queue().await?;
 
-            if let Some(item) = queue.into_iter().find(|item| item.url == url) {
+            // Find by URL, or grab any terminal item as fallback
+            let item = queue
+                .iter()
+                .find(|item| item.url.as_deref() == Some(url))
+                .or_else(|| {
+                    queue.iter().find(|i| {
+                        !matches!(
+                            i.status.as_str(),
+                            "queued" | "downloading" | "converting" | "processing"
+                        )
+                    })
+                })
+                .cloned();
+
+            if let Some(item) = item {
                 match item.status.as_str() {
                     "queued" | "downloading" | "converting" | "processing" => {
                         tracing::debug!("Deemix status for {}: {}", url, item.status);

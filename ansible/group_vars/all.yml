@@ -1,0 +1,19 @@
+# Secrets — fill these in or pass via --extra-vars
+spotify_client_id: "{{ lookup('env', 'WISH_SPOTIFY_CLIENT_ID') | default('', true) }}"
+spotify_client_secret: "{{ lookup('env', 'WISH_SPOTIFY_CLIENT_SECRET') | default('', true) }}"
+deemix_arl: "{{ lookup('env', 'WISH_DEEMIX_ARL') | default('', true) }}"
+
+# Paths
+wish_home: /home/momo/wish
+cargo_home: /home/momo/.cargo
+wish_user: momo
+wish_port: 8700
+dufs_port: 8321
+download_dir: /opt/download-service/downloads
+deemix_port: 6595
+
+# Deemix Docker
+deemix_image: registry.gitlab.com/bockiii/deemix-docker:latest
+
+# yt-dlp / spotdl venv
+venv_path: /srv/download-service/.venv
