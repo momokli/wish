@@ -311,7 +311,7 @@ async fn try_spotdl(
         let _ = db::update_submission_status(pool, sub.id, "stage3_spotdl", None, None, None).await;
     }
     let fmt = dir
-        .join("{title} - {artists}.{ext}")
+        .join("{title} - {artists}.{output-ext}")
         .to_string_lossy()
         .to_string();
     for a in 1..=max_retries {

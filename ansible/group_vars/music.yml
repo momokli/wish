@@ -6,17 +6,17 @@ cargo_home: /home/momo/.cargo
 wish_port: 8700
 restart_sec: 10
 
-# PATH for wish systemd service (no Python venv on music host)
-wish_path: "{{ cargo_home }}/bin:/usr/local/bin:/usr/bin:/bin"
+# PATH — spotdl lives in .local/bin on the music host
+wish_path: "{{ cargo_home }}/bin:/home/momo/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
-# Download output (shared NAS/mount on the music host)
-download_dir: /opt/music-stack/downloads
+# Download output — shared with deemix-128 container
+download_dir: /data/public/media/music/mp3_128
 
-# Deemix (runs on the music host directly, not Docker)
-deemix_port: 6596
-deemix_base_url: "http://localhost:6596"
+# Deemix-128 (port 6597) — free-tier ARL works with 128kbps
+deemix_port: 6597
+deemix_base_url: "http://localhost:6597"
 
 # Spotify credentials (from env or --extra-vars)
 spotify_client_id: "{{ lookup('env', 'WISH_SPOTIFY_CLIENT_ID') }}"
 spotify_client_secret: "{{ lookup('env', 'WISH_SPOTIFY_CLIENT_SECRET') }}"
-# deemix_arl: "{{ lookup('env', 'WISH_DEEMIX_ARL') }}"  # uncomment when ARL available
+deemix_arl: "{{ lookup('env', 'WISH_DEEMIX_ARL') }}"
