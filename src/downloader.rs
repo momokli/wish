@@ -152,36 +152,22 @@ async fn process_one(
 
     match src {
         "spotify" => {
-            // L1: spotDL
+            // L1: deemix (320kbps, best quality)
+            note(&pool, id, "deemix", "starting deemix (320kbps)").await;
+            if try_deemix(&pool, &deemix, &dir, &sub, timeout_secs)
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            note(&pool, id, "deemix", "deemix failed, falling back to spotDL").await;
+
+            // L2: spotDL
             note(&pool, id, "spotDL", "starting spotDL").await;
             if try_spotdl(&pool, &dir, &sub, max_retries, timeout_secs)
                 .await
                 .is_ok()
             {
-                if ytdlp {
-                    note(
-                        &pool,
-                        id,
-                        "deemix-upgrade",
-                        "spawning background deemix upgrade",
-                    )
-                    .await;
-                    let p2 = pool.clone();
-                    let d2 = deemix.clone();
-                    let dir2 = dir.clone();
-                    let s2 = sub.clone();
-                    let t2 = timeout_secs;
-                    tokio::spawn(async move {
-                        if let Err(e) = try_deemix(&p2, &d2, &dir2, &s2, t2).await {
-                            tracing::warn!("[{}] deemix upgrade failed: {e}", s2.id);
-                        } else {
-                            tracing::info!(
-                                "[{}] deemix upgrade: replaced spotDL file with higher quality",
-                                s2.id
-                            );
-                        }
-                    });
-                }
                 return;
             }
             note(
@@ -192,7 +178,7 @@ async fn process_one(
             )
             .await;
 
-            // L2: yt-dlp
+            // L3: yt-dlp
             if ytdlp {
                 if let (Some(t), Some(a)) =
                     (sub.track_title.as_deref(), sub.track_artist.as_deref())
@@ -215,51 +201,13 @@ async fn process_one(
                     .await
                     .is_ok()
                     {
-                        if ytdlp {
-                            note(
-                                &pool,
-                                id,
-                                "deemix-upgrade",
-                                "spawning background deemix upgrade",
-                            )
-                            .await;
-                            let p2 = pool.clone();
-                            let d2 = deemix.clone();
-                            let dir2 = dir.clone();
-                            let s2 = sub.clone();
-                            let t2 = timeout_secs;
-                            tokio::spawn(async move {
-                                if let Err(e) = try_deemix(&p2, &d2, &dir2, &s2, t2).await {
-                                    tracing::warn!("[{}] deemix upgrade failed: {e}", s2.id);
-                                } else {
-                                    tracing::info!(
-                                        "[{}] deemix upgrade: replaced yt-dlp file with higher quality",
-                                        s2.id
-                                    );
-                                }
-                            });
-                        }
                         return;
                     }
-                    note(
-                        &pool,
-                        id,
-                        "yt-dlp",
-                        "yt-dlp exhausted, falling back to deemix",
-                    )
-                    .await;
+                    note(&pool, id, "yt-dlp", "yt-dlp exhausted").await;
                 }
             }
 
-            // L3: deemix
-            note(&pool, id, "deemix", "starting deemix as last resort").await;
-            if try_deemix(&pool, &deemix, &dir, &sub, timeout_secs)
-                .await
-                .is_ok()
-            {
-                return;
-            }
-            fail(&pool, id, "spotDL + yt-dlp + deemix all failed").await;
+            fail(&pool, id, "deemix + spotDL + yt-dlp all failed").await;
         }
         "youtube" => {
             let query = if let (Some(t), Some(a)) =

@@ -359,3 +359,125 @@
         name: dufs
         state: restarted
         daemon_reload: yes
+
+# ═══════════════════════════════════════════════════════════════════════
+# LAN: Deploy wish to the music host (192.168.178.200)
+# ═══════════════════════════════════════════════════════════════════════
+
+- name: Deploy Wish backend on LAN music host
+  hosts: music
+
+  tasks:
+    - name: Install Rust (if missing)
+      ansible.builtin.shell: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      args:
+        creates: "{{ cargo_home }}/bin/rustc"
+      tags: [deps]
+
+    - name: Install spotDL
+      ansible.builtin.pip:
+        name: spotdl
+        executable: pip3
+      tags: [deps]
+
+    - name: Clone wish repo
+      ansible.builtin.git:
+        repo: https://github.com/momokli/wish.git
+        dest: "{{ wish_home }}"
+        version: feat/lan-deploy
+      tags: [deploy]
+
+    - name: Build wish release binary
+      ansible.builtin.shell: |
+        export PATH="{{ cargo_home }}/bin:$PATH"
+        cargo build --release
+      args:
+        chdir: "{{ wish_home }}"
+        creates: "{{ wish_home }}/target/release/wish"
+      tags: [deploy]
+
+    - name: Create config directory
+      ansible.builtin.file:
+        path: /home/{{ wish_user }}/.config/wish
+        state: directory
+        mode: "0700"
+      tags: [config]
+
+    - name: Deploy wish config
+      ansible.builtin.template:
+        src: wish-lan.config.toml.j2
+        dest: /home/{{ wish_user }}/.config/wish/config.toml
+        mode: "0600"
+      notify: restart wish
+      tags: [config]
+
+    - name: Install wish systemd service
+      ansible.builtin.template:
+        src: wish.service.j2
+        dest: /etc/systemd/system/wish.service
+        mode: "0644"
+      become: yes
+      notify: restart wish
+      tags: [systemd]
+
+    - name: Enable and start wish
+      ansible.builtin.systemd:
+        name: wish
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      become: yes
+      tags: [systemd]
+
+    - name: Wait for wish to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:{{ wish_port }}/health"
+        status_code: 200
+      register: health
+      retries: 10
+      delay: 2
+      until: health is success
+      tags: [verify]
+
+  handlers:
+    - name: restart wish
+      ansible.builtin.systemd:
+        name: wish
+        state: restarted
+        daemon_reload: yes
+      become: yes
+
+# ═══════════════════════════════════════════════════════════════════════
+# LAN: Configure Caddy reverse proxy on the LAN host
+# ═══════════════════════════════════════════════════════════════════════
+
+- name: Configure Caddy reverse proxy on LAN host
+  hosts: lan
+
+  tasks:
+    - name: Deploy wish Caddy site config
+      ansible.builtin.template:
+        src: caddy-wish.conf.j2
+        dest: /home/momo/caddy/sites/wish.conf
+        mode: "0644"
+      notify: reload caddy
+      tags: [caddy]
+
+    - name: Ensure wish.simonklimke.de in home_domains.txt
+      ansible.builtin.lineinfile:
+        path: /home/momo/home_domains.txt
+        line: wish.simonklimke.de
+        create: yes
+        mode: "0644"
+      tags: [caddy]
+
+    - name: Restart Caddy Docker container
+      ansible.builtin.shell: docker restart caddy-caddy-1
+      changed_when: true
+      tags: [caddy]
+
+  handlers:
+    - name: reload caddy
+      ansible.builtin.shell: docker restart caddy-caddy-1
+      changed_when: true

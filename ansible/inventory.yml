@@ -3,3 +3,9 @@ all:
     projectmellon.de:
       ansible_user: root
       ansible_python_interpreter: /usr/bin/python3
+    music:
+      ansible_host: 192.168.178.200
+      ansible_user: momo
+    lan:
+      ansible_connection: ssh
+      ansible_user: momo

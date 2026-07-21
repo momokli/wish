@@ -1,0 +1,17 @@
+# ── Music host (LAN, 192.168.178.200) ──────────────────────────────
+
+wish_user: momo
+wish_home: /home/momo/wish
+cargo_home: /home/momo/.cargo
+wish_port: 8700
+restart_sec: 10
+
+# PATH for wish systemd service (no Python venv on music host)
+wish_path: "{{ cargo_home }}/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Download output (shared NAS/mount on the music host)
+download_dir: /opt/music-stack/downloads
+
+# Deemix (runs on the music host directly, not Docker)
+deemix_port: 6596
+deemix_base_url: "http://localhost:6596"
