@@ -216,7 +216,7 @@
       become_user: "{{ wish_user }}"
       environment:
         PATH: "{{ cargo_home }}/bin:{{ venv_path }}/bin:/usr/local/bin:/usr/bin:/bin"
-      tags: [wish, deploy]
+      tags: [wish, build, deploy]
 
     - name: Deploy wish config
       ansible.builtin.template:
@@ -395,7 +395,7 @@
       args:
         chdir: "{{ wish_home }}"
         creates: "{{ wish_home }}/target/release/wish"
-      tags: [deploy]
+      tags: [build, deploy]
 
     - name: Create config directory
       ansible.builtin.file:
@@ -420,6 +420,28 @@
       become: yes
       notify: restart wish
       tags: [systemd]
+
+    - name: Create wish env override directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/wish.service.d
+        state: directory
+        mode: "0755"
+      become: yes
+      tags: [config]
+
+    - name: Deploy wish env vars (Spotify + ARL)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/wish.service.d/env.conf
+        content: |
+          [Service]
+          Environment=WISH_SPOTIFY_CLIENT_ID={{ spotify_client_id }}
+          Environment=WISH_SPOTIFY_CLIENT_SECRET={{ spotify_client_secret }}
+          {% if deemix_arl is defined and deemix_arl | length > 0 %}
+          Environment=WISH_DEEMIX_ARL={{ deemix_arl }}
+          {% endif %}
+      become: yes
+      notify: restart wish
+      tags: [config]
 
     - name: Enable and start wish
       ansible.builtin.systemd:

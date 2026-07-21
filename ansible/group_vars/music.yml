@@ -15,3 +15,8 @@ download_dir: /opt/music-stack/downloads
 # Deemix (runs on the music host directly, not Docker)
 deemix_port: 6596
 deemix_base_url: "http://localhost:6596"
+
+# Spotify credentials (from env or --extra-vars)
+spotify_client_id: "{{ lookup('env', 'WISH_SPOTIFY_CLIENT_ID') }}"
+spotify_client_secret: "{{ lookup('env', 'WISH_SPOTIFY_CLIENT_SECRET') }}"
+# deemix_arl: "{{ lookup('env', 'WISH_DEEMIX_ARL') }}"  # uncomment when ARL available

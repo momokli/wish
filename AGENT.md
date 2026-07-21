@@ -1,6 +1,6 @@
 # Wish — Agent Guidance
 
-> **Last Updated**: 2026-07-20 — v0.6.0 (ansible deploy + full pipeline verification)
+> **Last Updated**: 2026-07-21 — v0.6.1 (LAN deploy finalization)
 
 ---
 
@@ -998,6 +998,73 @@ Full setup in `deploy/deemix/README.md` — key steps:
 1. Configure Spotify plugin via UI at `http://localhost:6595`
 2. Inject ARL: `curl -X POST http://localhost:6595/api/loginArl -H 'Content-Type: application/json' -d '{"arl":"..."}'`
 3. Verify: `curl http://localhost:6595/api/getQueue`
+
+### LAN (home network)
+
+Target: **192.168.178.200** (music host), behind Caddy reverse proxy on LAN host.
+
+| Component     | Location                                                            |
+| ------------- | ------------------------------------------------------------------- |
+| wish binary   | 192.168.178.200:8700 (systemd)                                      |
+| deemix-320    | 192.168.178.200:6596 (docker, `deemix-320` container)               |
+| dufs          | 192.168.178.200:5000 (docker, `dufs` container)                     |
+| Caddy         | LAN host (docker, `caddy-caddy-1`)                                  |
+| Domains       | wish.simonklimke.de, files.wish.simonklimke.de                      |
+| Spotify creds | systemd env override: `/etc/systemd/system/wish.service.d/env.conf` |
+
+#### Deploy
+
+```bash
+# Deploy wish + Caddy to LAN hosts (music + lan groups)
+WISH_SPOTIFY_CLIENT_ID=... WISH_SPOTIFY_CLIENT_SECRET=... \
+  ansible-playbook -i ansible/inventory.yml ansible/playbook.yml --limit music,lan
+
+# Partial deploys via tags:
+ansible-playbook ... --limit music --tags deps      # Rust + system deps only
+ansible-playbook ... --limit music --tags build     # git clone + cargo build
+ansible-playbook ... --limit music --tags config    # config files + env override
+ansible-playbook ... --limit music --tags systemd   # restart wish service
+ansible-playbook ... --limit lan   --tags caddy     # Caddy config only
+```
+
+#### Ansible tags
+
+| Tag       | What it covers                                            |
+| --------- | --------------------------------------------------------- |
+| `deps`    | Rust toolchain, spotDL, system packages                   |
+| `build`   | `git clone` + `cargo build --release`                     |
+| `config`  | `config.toml` template + env override (`wish.service.d/`) |
+| `systemd` | wish service install + daemon-reload + restart            |
+| `deploy`  | full deploy (git clone, build, config, start)             |
+| `caddy`   | Caddy site config + container restart                     |
+| `verify`  | health check after deploy                                 |
+
+#### Service file override (`/etc/systemd/system/wish.service.d/env.conf`)
+
+```ini
+[Service]
+Environment=WISH_SPOTIFY_CLIENT_ID=...
+Environment=WISH_SPOTIFY_CLIENT_SECRET=...
+Environment=WISH_DEEMIX_ARL=...
+```
+
+Managed by Ansible — re-run `--tags config` to update credentials.
+
+#### Logs
+
+```bash
+# wish service logs (on 192.168.178.200)
+ssh momo@192.168.178.200 journalctl -u wish.service --no-pager -n 50 -f
+
+# deemix-320 container logs (on 192.168.178.200)
+ssh momo@192.168.178.200 docker logs deemix-320 --tail 50
+```
+
+#### Quick DB reset (LAN)
+
+```bash
+ssh momo@192.168.178.200 "sqlite3 /home/momo/wish/wish.db 'DELETE FROM submissions;'"
+```
 
 ---
 
