@@ -4,16 +4,19 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::Deserialize;
 use sqlx::sqlite::SqlitePool;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 use tokio::sync::Notify;
 
 use crate::config::Config;
 use crate::db;
+use crate::error::AppError;
 use crate::models::*;
+use crate::playlists;
 use crate::spotify::SpotifyClient;
 
 /// Shared application state.
@@ -23,15 +26,23 @@ pub struct AppState {
     pub spotify: Option<SpotifyClient>,
     pub download_notify: Arc<Notify>,
     pub ytdlp_available: bool,
+    pub spotdl_available: bool,
 }
 
-/// Embedded frontend assets.
+/// Embedded frontend assets (built by scripts/build-html.mjs).
 #[derive(rust_embed::RustEmbed)]
-#[folder = "frontend/"]
+#[folder = "frontend/dist/"]
 struct FrontendAssets;
 
 /// Build the application router.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    use tower_http::cors::{Any, CorsLayer};
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     Router::new()
         // Public endpoints
         .route("/", get(serve_frontend))
@@ -43,7 +54,131 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Deck Feeder integration
         .route("/tracks", get(tracks))
         .route("/downloads/{filename}", get(serve_download))
+        // Playlists
+        .route("/playlists", get(playlists_list).post(playlists_add))
+        .route("/playlists/{id}", delete(playlists_delete))
+        .route("/playlists/{id}/sync", post(playlists_sync))
+        // Admin
+        .route("/admin", get(serve_admin))
+        .route("/admin/data", get(admin_data))
+        .layer(cors)
         .with_state(state)
+}
+
+// ─── Admin ────────────────────────────────────────────────────────
+
+async fn serve_admin() -> impl IntoResponse {
+    match FrontendAssets::get("admin.html") {
+        Some(file) => Response::builder()
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(file.data))
+            .expect("infallible: response builder"),
+        None => (
+            StatusCode::NOT_FOUND,
+            "Admin page not found. Place admin.html in frontend/",
+        )
+            .into_response(),
+    }
+}
+
+async fn admin_data(State(state): State<Arc<AppState>>) -> Result<Json<Vec<AdminRow>>, AppError> {
+    let rows = sqlx::query_as::<_, AdminRow>(
+        "SELECT id, track_title, track_artist, spotify_url, source, status, filename, file_size, error_message, bitrate, container, attempts_json, created_at, updated_at, first_available_at FROM submissions ORDER BY created_at DESC"
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| AppError::Internal(format!("DB error: {e}")))?;
+    Ok(Json(rows))
+}
+
+// ─── Playlists ────────────────────────────────────────────────────
+
+async fn playlists_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Playlist>>, AppError> {
+    let playlists = db::get_playlists(&state.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("DB error: {e}")))?;
+    Ok(Json(playlists))
+}
+
+async fn playlists_add(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AddPlaylistRequest>,
+) -> Result<Json<Playlist>, AppError> {
+    let source = body
+        .source
+        .unwrap_or_else(|| playlists::detect_source(&body.url));
+
+    if source == "unknown" {
+        return Err(AppError::BadRequest(
+            "Unsupported URL. Please enter a Spotify, YouTube, or SoundCloud link.".to_string(),
+        ));
+    }
+
+    // Insert with no title initially — sync will fill it in
+    let mut playlist = db::insert_playlist(&state.pool, &body.url, &source, None)
+        .await
+        .map_err(|e| AppError::Internal(format!("DB error: {e}")))?;
+
+    // Do initial sync to resolve the title and import tracks
+    if let Err(e) = playlists::sync_one(
+        &state.pool,
+        &playlist,
+        &state.download_notify,
+        state.spotify.as_ref(),
+    )
+    .await
+    {
+        tracing::warn!("[{}] Initial playlist sync failed: {e}", playlist.id);
+        // Re-fetch so the caller gets the updated record (error persisted)
+        playlist = db::get_playlist_by_id(&state.pool, playlist.id)
+            .await
+            .map_err(|e| AppError::Internal(format!("DB error: {e}")))?
+            .ok_or_else(|| AppError::Internal("Playlist disappeared after insert".into()))?;
+    }
+
+    Ok(Json(playlist))
+}
+
+async fn playlists_delete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, AppError> {
+    let deleted = db::delete_playlist(&state.pool, id)
+        .await
+        .map_err(|e| AppError::Internal(format!("DB error: {e}")))?;
+    if deleted {
+        Ok(StatusCode::OK)
+    } else {
+        Err(AppError::NotFound(format!("Playlist {id} not found")))
+    }
+}
+
+async fn playlists_sync(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<Playlist>, AppError> {
+    let playlist = db::get_playlist_by_id(&state.pool, id)
+        .await
+        .map_err(|e| AppError::Internal(format!("DB error: {e}")))?
+        .ok_or_else(|| AppError::NotFound(format!("Playlist {id} not found")))?;
+
+    playlists::sync_one(
+        &state.pool,
+        &playlist,
+        &state.download_notify,
+        state.spotify.as_ref(),
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Sync failed: {e}")))?;
+
+    let updated = db::get_playlist_by_id(&state.pool, id)
+        .await
+        .map_err(|e| AppError::Internal(format!("DB error: {e}")))?
+        .ok_or_else(|| AppError::Internal("Playlist vanished after sync".into()))?;
+
+    Ok(Json(updated))
 }
 
 // ─── Frontend ────────────────────────────────────────────────────
@@ -57,7 +192,7 @@ async fn serve_frontend() -> impl IntoResponse {
             Response::builder()
                 .header(header::CONTENT_TYPE, mime)
                 .body(Body::from(file.data))
-                .unwrap()
+                .expect("infallible: response builder")
         }
         None => (
             StatusCode::NOT_FOUND,
@@ -70,8 +205,6 @@ async fn serve_frontend() -> impl IntoResponse {
 // ─── Health ──────────────────────────────────────────────────────
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let spotdl_available = which::which("spotdl").is_ok();
-
     // Quick check if deemix is authenticated (non-blocking)
     let deemix_authenticated = !state.config.deemix.arl.is_empty();
 
@@ -80,7 +213,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
         deemix_configured: !state.config.deemix.base_url.is_empty(),
         deemix_authenticated,
         spotify_configured: !state.config.spotify.client_id.is_empty(),
-        spotdl_available,
+        spotdl_available: state.spotdl_available,
         ytdlp_available: state.ytdlp_available,
     })
 }
@@ -196,6 +329,13 @@ async fn download(
         .map(|s| s.to_lowercase())
         .unwrap_or_else(|| detect_source(&url));
 
+    // Reject unsupported URLs early with a clear error
+    if source == "unknown" {
+        return Err(AppError::BadRequest(
+            "Unsupported URL. Please enter a Spotify, YouTube, or SoundCloud link.".to_string(),
+        ));
+    }
+
     // Validate URL format
     if !is_valid_url(&url, &source) {
         return Err(AppError::BadRequest(format!(
@@ -227,7 +367,13 @@ async fn download(
         _ => {
             // For youtube/soundcloud, try to get metadata via yt-dlp
             if state.ytdlp_available {
-                resolve_via_ytdlp(&url).await.unwrap_or((None, None, None))
+                match resolve_via_ytdlp(&url).await {
+                    Ok(meta) => meta,
+                    Err(e) => {
+                        tracing::warn!("yt-dlp metadata resolution failed for {}: {e}", url);
+                        (None, None, None)
+                    }
+                }
             } else {
                 (None, None, None)
             }
@@ -262,17 +408,9 @@ async fn download(
 }
 
 /// Detect the source platform from a URL.
+/// Canonical source detection — delegates to models.rs to avoid duplication.
 fn detect_source(url: &str) -> String {
-    let lower = url.to_lowercase();
-    if lower.contains("spotify.com") || lower.starts_with("spotify:track:") {
-        "spotify".to_string()
-    } else if lower.contains("youtube.com") || lower.contains("youtu.be") {
-        "youtube".to_string()
-    } else if lower.contains("soundcloud.com") {
-        "soundcloud".to_string()
-    } else {
-        "spotify".to_string() // default fallback
-    }
+    crate::models::detect_source(url)
 }
 
 /// Validate a URL is plausible for its source.
@@ -389,26 +527,34 @@ async fn serve_download(
         return Err(AppError::BadRequest("Invalid filename".to_string()));
     }
 
-    // Verify the file is in the submissions table OR exists on disk
+    // Verify the file is in the submissions table
     let submissions = db::get_downloaded_submissions(&state.pool).await?;
     let matched = submissions
         .iter()
         .any(|s| s.filename.as_deref() == Some(filename_str));
 
+    if !matched {
+        return Err(AppError::NotFound("File not found".to_string()));
+    }
+
     let file_path = state.config.download.output_dir.join(filename_str);
 
-    // Allow serving if file exists on disk (even if not in DB)
     if !file_path.exists() {
         return Err(AppError::NotFound("File not found on disk".to_string()));
     }
 
-    if !matched && !file_path.exists() {
-        return Err(AppError::NotFound("File not found".to_string()));
-    }
+    use tokio::io::AsyncSeekExt;
+    use tokio_util::io::ReaderStream;
 
-    let file = tokio::fs::read(&file_path)
+    let file = tokio::fs::File::open(&file_path)
         .await
         .map_err(|_| AppError::NotFound("Failed to read file".to_string()))?;
+
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|_| AppError::Internal("Failed to get file metadata".to_string()))?;
+    let file_size = metadata.len();
 
     let mime = mime_guess::from_path(&file_path)
         .first_or_octet_stream()
@@ -417,33 +563,41 @@ async fn serve_download(
     // Support Range header for audio streaming
     if let Some(range_header) = headers.get(header::RANGE) {
         if let Ok(range_str) = range_header.to_str() {
-            if let Some(range) = parse_range(range_str, file.len() as u64) {
-                let start = range.0 as usize;
-                let end = range.1 as usize;
-                let slice = &file[start..=end];
-                let content_length = slice.len();
+            if let Some(range) = parse_range(range_str, file_size) {
+                let start = range.0;
+                let end = range.1;
+                let mut file = file;
+                file.seek(tokio::io::SeekFrom::Start(start))
+                    .await
+                    .map_err(|_| AppError::Internal("Failed to seek file".to_string()))?;
+                let limited = file.take(end - start + 1);
+                let stream = ReaderStream::new(limited);
+                let body = Body::from_stream(stream);
 
                 return Ok(Response::builder()
                     .status(StatusCode::PARTIAL_CONTENT)
                     .header(header::CONTENT_TYPE, mime)
-                    .header(header::CONTENT_LENGTH, content_length.to_string())
+                    .header(header::CONTENT_LENGTH, (end - start + 1).to_string())
                     .header(
                         header::CONTENT_RANGE,
-                        format!("bytes {}-{}/{}", start, end, file.len()),
+                        format!("bytes {}-{}/{}", start, end, file_size),
                     )
                     .header(header::ACCEPT_RANGES, "bytes")
-                    .body(Body::from(slice.to_vec()))
-                    .unwrap());
+                    .body(body)
+                    .expect("infallible: response builder"));
             }
         }
     }
 
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, mime)
-        .header(header::CONTENT_LENGTH, file.len().to_string())
+        .header(header::CONTENT_LENGTH, file_size.to_string())
         .header(header::ACCEPT_RANGES, "bytes")
-        .body(Body::from(file))
-        .unwrap())
+        .body(body)
+        .expect("infallible: response builder"))
 }
 
 fn parse_range(range_str: &str, file_size: u64) -> Option<(u64, u64)> {
@@ -470,43 +624,4 @@ fn parse_range(range_str: &str, file_size: u64) -> Option<(u64, u64)> {
     }
 
     Some((start, end))
-}
-
-// ─── AppError ────────────────────────────────────────────────────
-
-#[derive(Debug)]
-pub enum AppError {
-    BadRequest(String),
-    NotFound(String),
-    Internal(String),
-    ServiceUnavailable(String),
-}
-
-impl From<anyhow::Error> for AppError {
-    fn from(e: anyhow::Error) -> Self {
-        AppError::Internal(format!("{:#}", e))
-    }
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, message) = match self {
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::Internal(msg) => {
-                tracing::error!("Internal error: {}", msg);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal server error".to_string(),
-                )
-            }
-            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
-        };
-
-        let body = serde_json::json!({
-            "error": message,
-        });
-
-        (status, Json(body)).into_response()
-    }
 }

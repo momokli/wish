@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en" class="admin-page">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>wish — admin</title>
+        <link rel="stylesheet" href="css/style.css" />
+    </head>
+    <body>
+        <h1>wish admin</h1>
+        <p class="sub">
+            Pipeline traceability — click "logs" to see per-track download attempts
+        </p>
+
+        <div class="toolbar">
+            <button class="active" data-filter="all">All</button>
+            <button data-filter="ready">Ready</button>
+            <button data-filter="failed">Failed</button>
+            <button data-filter="pending">Pending</button>
+            <span
+                id="avg-time"
+                style="margin-left: auto; color: var(--muted); font-size: 10px"
+            ></span>
+            <span id="refresh">auto 10s</span>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th data-sort="id">#</th>
+                    <th data-sort="track_title">Title</th>
+                    <th data-sort="track_artist">Artist</th>
+                    <th data-sort="source">Source</th>
+                    <th data-sort="status">Status</th>
+                    <th data-sort="container">Container</th>
+                    <th data-sort="file_size">Size</th>
+                    <th data-sort="first_available_at">⏱</th>
+                    <th data-sort="filename">File</th>
+                    <th>Via</th>
+                    <th>Logs</th>
+                </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+        </table>
+
+        <h2>Playlists</h2>
+        <p class="sub">
+            Subscribed playlists &mdash; sync every 10 min, new tracks flow into
+            submissions
+        </p>
+
+        <div class="toolbar">
+            <button onclick="syncAllPlaylists()">Sync all now</button>
+            <span
+                id="playlist-refresh"
+                style="margin-left: auto; color: var(--muted); font-size: 10px"
+            ></span>
+        </div>
+
+        <div id="playlist-content">
+            <div class="empty">Loading playlists...</div>
+        </div>
+
+        <script src="js/admin.js"></script>
+    </body>
+</html>

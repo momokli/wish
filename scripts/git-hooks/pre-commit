@@ -1,0 +1,8 @@
+#!/bin/bash
+# wish — pre-commit validation gate
+# Must pass before any commit is accepted.
+set -e
+echo "═══ pre-commit: validate ═══"
+bash scripts/validate.sh
+echo ""
+echo "═══ pre-commit: ok ═══"

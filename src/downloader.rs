@@ -1,14 +1,12 @@
 use sqlx::sqlite::SqlitePool;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinSet;
 
 use crate::db;
 use crate::deemix::DeemixClient;
-
-const MAX_CONCURRENT: usize = 3;
-const MAX_RETRIES: u32 = 3;
 
 pub struct DownloadWorker {
     pool: SqlitePool,
@@ -16,15 +14,27 @@ pub struct DownloadWorker {
     output_dir: PathBuf,
     notify: Arc<Notify>,
     ytdlp_available: bool,
+    ytdlp_cookies: Option<PathBuf>,
+    ytdlp_proxy: Option<String>,
+    max_concurrent: usize,
+    max_retries: u32,
+    download_timeout_secs: u64,
+    in_flight: Arc<Mutex<HashSet<i64>>>,
 }
 
 impl DownloadWorker {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: SqlitePool,
         deemix: DeemixClient,
         output_dir: PathBuf,
         notify: Arc<Notify>,
         ytdlp_available: bool,
+        ytdlp_cookies: Option<PathBuf>,
+        ytdlp_proxy: Option<String>,
+        max_concurrent: usize,
+        max_retries: u32,
+        download_timeout_secs: u64,
     ) -> Self {
         Self {
             pool,
@@ -32,14 +42,20 @@ impl DownloadWorker {
             output_dir,
             notify,
             ytdlp_available,
+            ytdlp_cookies,
+            ytdlp_proxy,
+            max_concurrent,
+            max_retries,
+            download_timeout_secs,
+            in_flight: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         }
     }
 
-    pub async fn run(self) {
+    pub async fn run(&self) {
         tracing::info!(
             "Download worker: yt-dlp={}, concurrent={}",
             self.ytdlp_available,
-            MAX_CONCURRENT
+            self.max_concurrent
         );
         loop {
             tokio::select! {
@@ -63,19 +79,48 @@ impl DownloadWorker {
         let deemix = self.deemix.clone();
         let dir = self.output_dir.clone();
         let yt = self.ytdlp_available;
+        let cookies = self.ytdlp_cookies.clone();
+        let proxy = self.ytdlp_proxy.clone();
+        let in_flight = self.in_flight.clone();
 
         let mut set = JoinSet::new();
         let mut n = 0usize;
         for sub in pending {
-            set.spawn(process_one(
-                pool.clone(),
-                deemix.clone(),
-                dir.clone(),
-                yt,
-                sub,
-            ));
+            // Skip if this submission is already being processed by another cycle
+            let id = sub.id;
+            {
+                let mut guard = in_flight.lock().await;
+                if !guard.insert(id) {
+                    tracing::debug!("[{id}] already in-flight, skipping");
+                    continue;
+                }
+            }
+
+            let f_in_flight = in_flight.clone();
+            let f_pool = pool.clone();
+            let f_deemix = deemix.clone();
+            let f_dir = dir.clone();
+            let f_cookies = cookies.clone();
+            let f_proxy = proxy.clone();
+            let f_max_retries = self.max_retries;
+            let f_timeout_secs = self.download_timeout_secs;
+            set.spawn(async move {
+                process_one(
+                    f_pool,
+                    f_deemix,
+                    f_dir,
+                    yt,
+                    f_cookies,
+                    f_proxy,
+                    f_max_retries,
+                    f_timeout_secs,
+                    sub,
+                )
+                .await;
+                f_in_flight.lock().await.remove(&id);
+            });
             n += 1;
-            if n >= MAX_CONCURRENT {
+            if n >= self.max_concurrent {
                 set.join_next().await;
                 n -= 1;
             }
@@ -85,11 +130,16 @@ impl DownloadWorker {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_one(
     pool: SqlitePool,
     deemix: DeemixClient,
     dir: PathBuf,
     ytdlp: bool,
+    ytdlp_cookies: Option<PathBuf>,
+    ytdlp_proxy: Option<String>,
+    max_retries: u32,
+    timeout_secs: u64,
     sub: crate::models::Submission,
 ) {
     let id = sub.id;
@@ -97,33 +147,121 @@ async fn process_one(
     let url = &sub.spotify_url;
     tracing::info!("[{id}] {src}: {url}");
 
+    // Live: pipeline started
+    note(&pool, id, "start", &format!("{src} pipeline starting")).await;
+
     match src {
         "spotify" => {
-            // L1: deemix → L2: spotDL → L3: yt-dlp
-            if try_deemix(&pool, &deemix, &dir, &sub).await.is_ok() {
+            // L1: spotDL
+            note(&pool, id, "spotDL", "starting spotDL").await;
+            if try_spotdl(&pool, &dir, &sub, max_retries, timeout_secs)
+                .await
+                .is_ok()
+            {
+                if ytdlp {
+                    note(
+                        &pool,
+                        id,
+                        "deemix-upgrade",
+                        "spawning background deemix upgrade",
+                    )
+                    .await;
+                    let p2 = pool.clone();
+                    let d2 = deemix.clone();
+                    let dir2 = dir.clone();
+                    let s2 = sub.clone();
+                    let t2 = timeout_secs;
+                    tokio::spawn(async move {
+                        if let Err(e) = try_deemix(&p2, &d2, &dir2, &s2, t2).await {
+                            tracing::warn!("[{}] deemix upgrade failed: {e}", s2.id);
+                        } else {
+                            tracing::info!(
+                                "[{}] deemix upgrade: replaced spotDL file with higher quality",
+                                s2.id
+                            );
+                        }
+                    });
+                }
                 return;
             }
-            if try_spotdl(&pool, &dir, &sub).await.is_ok() {
-                return;
-            }
+            note(
+                &pool,
+                id,
+                "spotDL",
+                "spotDL exhausted, falling back to yt-dlp",
+            )
+            .await;
+
+            // L2: yt-dlp
             if ytdlp {
                 if let (Some(t), Some(a)) =
                     (sub.track_title.as_deref(), sub.track_artist.as_deref())
                 {
                     let q = format!("ytsearch1:{a} - {t}");
-                    let tmpl = dir.join("%(artist)s - %(title)s [%(id)s].%(ext)s");
-                    if let Err(e) = run_ytdlp(&pool, &dir, id, &tmpl, &q).await {
-                        fail(&pool, id, &e.to_string()).await;
+                    let tmpl =
+                        dir.join("%(artist,uploader|Unknown Artist)s - %(title)s [%(id)s].%(ext)s");
+                    note(&pool, id, "yt-dlp", &format!("searching: {q}")).await;
+                    if run_ytdlp(
+                        &pool,
+                        &dir,
+                        id,
+                        &tmpl,
+                        &q,
+                        ytdlp_cookies.as_ref(),
+                        ytdlp_proxy.as_deref(),
+                        max_retries,
+                        timeout_secs,
+                    )
+                    .await
+                    .is_ok()
+                    {
+                        if ytdlp {
+                            note(
+                                &pool,
+                                id,
+                                "deemix-upgrade",
+                                "spawning background deemix upgrade",
+                            )
+                            .await;
+                            let p2 = pool.clone();
+                            let d2 = deemix.clone();
+                            let dir2 = dir.clone();
+                            let s2 = sub.clone();
+                            let t2 = timeout_secs;
+                            tokio::spawn(async move {
+                                if let Err(e) = try_deemix(&p2, &d2, &dir2, &s2, t2).await {
+                                    tracing::warn!("[{}] deemix upgrade failed: {e}", s2.id);
+                                } else {
+                                    tracing::info!(
+                                        "[{}] deemix upgrade: replaced yt-dlp file with higher quality",
+                                        s2.id
+                                    );
+                                }
+                            });
+                        }
+                        return;
                     }
-                } else {
-                    fail(&pool, id, "no metadata for search").await;
+                    note(
+                        &pool,
+                        id,
+                        "yt-dlp",
+                        "yt-dlp exhausted, falling back to deemix",
+                    )
+                    .await;
                 }
-            } else {
-                fail(&pool, id, "yt-dlp not available").await;
             }
+
+            // L3: deemix
+            note(&pool, id, "deemix", "starting deemix as last resort").await;
+            if try_deemix(&pool, &deemix, &dir, &sub, timeout_secs)
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            fail(&pool, id, "spotDL + yt-dlp + deemix all failed").await;
         }
         "youtube" => {
-            // Use ytsearch1: with metadata — avoids YouTube bot detection on direct URLs
             let query = if let (Some(t), Some(a)) =
                 (sub.track_title.as_deref(), sub.track_artist.as_deref())
             {
@@ -131,19 +269,44 @@ async fn process_one(
             } else {
                 url.clone()
             };
-            let tmpl = dir.join("%(artist)s - %(title)s [%(id)s].%(ext)s");
-            if let Err(e) = run_ytdlp(&pool, &dir, id, &tmpl, &query).await {
+            let tmpl = dir.join("%(artist,uploader|Unknown Artist)s - %(title)s [%(id)s].%(ext)s");
+            note(&pool, id, "yt-dlp", &format!("searching: {query}")).await;
+            if let Err(e) = run_ytdlp(
+                &pool,
+                &dir,
+                id,
+                &tmpl,
+                &query,
+                ytdlp_cookies.as_ref(),
+                ytdlp_proxy.as_deref(),
+                max_retries,
+                timeout_secs,
+            )
+            .await
+            {
                 fail(&pool, id, &e.to_string()).await;
             }
         }
         "soundcloud" => {
-            // Direct URL — SoundCloud doesn't need ytsearch1:
-            let tmpl = dir.join("%(artist)s - %(title)s [%(id)s].%(ext)s");
-            if let Err(e) = run_ytdlp(&pool, &dir, id, &tmpl, url).await {
+            let tmpl = dir.join("%(artist,uploader|Unknown Artist)s - %(title)s [%(id)s].%(ext)s");
+            note(&pool, id, "yt-dlp", "downloading SoundCloud URL directly").await;
+            if let Err(e) = run_ytdlp(
+                &pool,
+                &dir,
+                id,
+                &tmpl,
+                url,
+                ytdlp_cookies.as_ref(),
+                ytdlp_proxy.as_deref(),
+                max_retries,
+                timeout_secs,
+            )
+            .await
+            {
                 fail(&pool, id, &e.to_string()).await;
             }
         }
-        other => fail(&pool, id, &format!("unknown: {other}")).await,
+        other => fail(&pool, id, &format!("unknown source: {other}")).await,
     }
 }
 
@@ -154,23 +317,38 @@ async fn try_deemix(
     deemix: &DeemixClient,
     dir: &Path,
     sub: &crate::models::Submission,
+    timeout_secs: u64,
 ) -> anyhow::Result<()> {
-    let _ = db::update_submission_status(pool, sub.id, "stage2_deemix", None, None, None).await;
+    if sub.filename.is_none() {
+        let _ = db::update_submission_status(pool, sub.id, "stage2_deemix", None, None, None).await;
+    }
+    note(pool, sub.id, "deemix", "adding to deemix queue").await;
     deemix.add_to_queue(&sub.spotify_url).await?;
-    match deemix.poll_until_done(&sub.spotify_url, 300).await {
+    note(
+        pool,
+        sub.id,
+        "deemix",
+        &format!("queued — polling for completion (timeout {timeout_secs}s)"),
+    )
+    .await;
+
+    match deemix.poll_until_done(&sub.spotify_url, timeout_secs).await {
         Ok(Some(item))
             if item.status == "finished"
                 || item.status == "downloaded"
                 || item.status == "completed" =>
         {
-            if let Some(f) = newest(dir).await {
+            if let Some(f) = scan_recent(dir, 5).await {
                 return done(pool, dir, sub.id, &f, "deemix").await;
             }
-            anyhow::bail!("file not found");
+            anyhow::bail!("deemix finished but file not found on disk (recent scan)");
         }
-        Ok(Some(item)) => anyhow::bail!("status: {}", item.status),
-        Ok(None) => anyhow::bail!("vanished"),
-        Err(e) => anyhow::bail!("{e}"),
+        Ok(Some(item)) => {
+            let msg = format!("deemix ended with status: {}", item.status);
+            anyhow::bail!(msg);
+        }
+        Ok(None) => anyhow::bail!("deemix: track vanished from queue before completion"),
+        Err(e) => anyhow::bail!("deemix poll error: {e}"),
     }
 }
 
@@ -178,14 +356,26 @@ async fn try_spotdl(
     pool: &SqlitePool,
     dir: &Path,
     sub: &crate::models::Submission,
+    max_retries: u32,
+    timeout_secs: u64,
 ) -> anyhow::Result<()> {
-    let _ = db::update_submission_status(pool, sub.id, "stage3_spotdl", None, None, None).await;
+    if sub.filename.is_none() {
+        let _ = db::update_submission_status(pool, sub.id, "stage3_spotdl", None, None, None).await;
+    }
     let fmt = dir
         .join("{title} - {artists}.{ext}")
         .to_string_lossy()
         .to_string();
-    for a in 1..=MAX_RETRIES {
-        let o = tokio::process::Command::new("spotdl")
+    for a in 1..=max_retries {
+        note(
+            pool,
+            sub.id,
+            "spotDL",
+            &format!("attempt {a}/{max_retries}"),
+        )
+        .await;
+        tracing::info!("[{}] spotDL {a}/{max_retries}", sub.id);
+        let fut = tokio::process::Command::new("spotdl")
             .args([
                 "download",
                 &sub.spotify_url,
@@ -193,21 +383,42 @@ async fn try_spotdl(
                 &fmt,
                 "--bitrate",
                 "320k",
-                "--no-overwrites",
+                "--overwrite",
+                "skip",
             ])
-            .output()
-            .await?;
+            .output();
+        let o = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("spotDL timed out after {timeout_secs}s"))??;
         if o.status.success() {
-            if let Some(f) = newest(dir).await {
+            if let Some(f) = scan_recent(dir, 5).await {
                 return done(pool, dir, sub.id, &f, "spotDL").await;
             }
-            anyhow::bail!("no output");
+            note(
+                pool,
+                sub.id,
+                "spotDL",
+                "spotDL exited OK but no output file found",
+            )
+            .await;
+            tracing::warn!("[{}] spotDL OK but no output file", sub.id);
+        } else {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let reason = stderr.lines().last().unwrap_or("");
+            note(
+                pool,
+                sub.id,
+                "spotDL",
+                &format!("attempt {a} failed: {reason}"),
+            )
+            .await;
+            tracing::warn!("[{}] spotDL {a} failed: {reason}", sub.id);
         }
-        if a < MAX_RETRIES {
+        if a < max_retries {
             tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(a - 1))).await;
         }
     }
-    anyhow::bail!("spotDL failed");
+    anyhow::bail!("spotDL failed after {max_retries} attempts");
 }
 
 async fn run_ytdlp(
@@ -216,29 +427,38 @@ async fn run_ytdlp(
     id: i64,
     tmpl: &Path,
     url: &str,
+    cookies: Option<&PathBuf>,
+    proxy: Option<&str>,
+    max_retries: u32,
+    timeout_secs: u64,
 ) -> anyhow::Result<()> {
     let t = tmpl.to_string_lossy().to_string();
-    for a in 1..=MAX_RETRIES {
-        tracing::info!("[{id}] yt-dlp {a}/{MAX_RETRIES}");
-        let o = tokio::process::Command::new("yt-dlp")
-            .args([
-                "-x",
-                "--audio-format",
-                "mp3",
-                "--audio-quality",
-                "0",
-                "--embed-metadata",
-                "--embed-thumbnail",
-                "--no-playlist",
-                "--no-overwrites",
-                "--print",
-                "after_move:filepath",
-                "-o",
-                &t,
-                url,
-            ])
-            .output()
-            .await?;
+    for a in 1..=max_retries {
+        note(pool, id, "yt-dlp", &format!("attempt {a}/{max_retries}")).await;
+        tracing::info!("[{id}] yt-dlp {a}/{max_retries}");
+        let mut cmd = tokio::process::Command::new("yt-dlp");
+        cmd.args([
+            "-x",
+            "--audio-format",
+            "mp3",
+            "--audio-quality",
+            "0",
+            "--embed-metadata",
+            "--embed-thumbnail",
+            "--no-playlist",
+            "--no-overwrites",
+        ]);
+        if let Some(c) = cookies {
+            cmd.arg("--cookies").arg(c);
+        }
+        if let Some(p) = proxy {
+            cmd.arg("--proxy").arg(p);
+        }
+        cmd.args(["--print", "after_move:filepath", "-o", &t, url]);
+        let fut = cmd.output();
+        let o = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("yt-dlp timed out after {timeout_secs}s"))??;
         if o.status.success() {
             let out = String::from_utf8_lossy(&o.stdout);
             if let Some(fp) = out.lines().last().filter(|l| !l.trim().is_empty()) {
@@ -246,27 +466,50 @@ async fn run_ytdlp(
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| fp.to_string());
+
+                // Persist artist/title from filename if not already set
+                let stem = name.rsplitn(2, '.').nth(1).unwrap_or(&name);
+                if let Some((artist, title)) = parse_stem_title(stem) {
+                    let _ = db::update_track_metadata(pool, id, &title, artist.as_deref()).await;
+                }
+
                 return done(pool, dir, id, &name, "yt-dlp").await;
             }
-            if let Some(f) = newest(dir).await {
-                return done(pool, dir, id, &f, "yt-dlp").await;
-            }
-            anyhow::bail!("can't find output");
+            anyhow::bail!("yt-dlp succeeded but no filepath printed to stdout");
         }
         let stderr = String::from_utf8_lossy(&o.stderr);
-        let reason = reason(&stderr);
-        if a < MAX_RETRIES {
-            let d = std::time::Duration::from_secs(2u64.pow(a - 1));
-            tracing::warn!("[{id}] yt-dlp {a} failed: {reason} ({d:?})");
-            tokio::time::sleep(d).await;
+        let rsn = reason(&stderr);
+        note(pool, id, "yt-dlp", &format!("attempt {a} failed: {rsn}")).await;
+        if a < max_retries {
+            let delay = std::time::Duration::from_secs(2u64.pow(a - 1));
+            tracing::warn!("[{id}] yt-dlp {a} failed ({delay:?}): {rsn}");
+            tokio::time::sleep(delay).await;
         } else {
-            anyhow::bail!("{reason}");
+            anyhow::bail!("{rsn}");
         }
     }
     unreachable!()
 }
 
+/// Parse "Artist - Title" or "Unknown Artist - Title" from a yt-dlp filename stem.
+fn parse_stem_title(stem: &str) -> Option<(Option<String>, String)> {
+    // Strip trailing " [id]" if present
+    let without_id = stem.rsplitn(2, " [").next()?;
+    without_id.split_once(" - ").map(|(artist, title)| {
+        let artist = match artist {
+            "NA" | "Unknown Artist" => None,
+            a => Some(a.to_string()),
+        };
+        (artist, title.to_string())
+    })
+}
+
 // ── Helpers ──
+
+/// Log a pipeline note (visible in admin logs immediately).
+async fn note(pool: &SqlitePool, id: i64, layer: &str, msg: &str) {
+    let _ = db::append_attempt(pool, id, layer, false, None, None, None, Some(msg)).await;
+}
 
 fn reason(s: &str) -> String {
     let lo = s.to_lowercase();
@@ -299,23 +542,44 @@ async fn done(
         .await
         .ok()
         .map(|m| m.len() as i64);
+    let container = name.split('.').last().map(|e| e.to_lowercase());
     let note = format!("downloaded via {stage}");
     db::update_submission_status(pool, id, "ready", Some(name), sz, Some(&note)).await?;
+    let _ = sqlx::query(
+        "UPDATE submissions SET first_available_at = COALESCE(first_available_at, unixepoch()) WHERE id = ?"
+    ).bind(id).execute(pool).await;
+    let _ = db::append_attempt(
+        pool,
+        id,
+        stage,
+        true,
+        Some(name),
+        None,
+        container.as_deref(),
+        None,
+    )
+    .await;
     tracing::info!("[{id}] ready [{stage}] {name}");
     Ok(())
 }
 
 async fn fail(pool: &SqlitePool, id: i64, reason: &str) {
     let _ = db::update_submission_status(pool, id, "failed", None, None, Some(reason)).await;
+    let _ = db::append_attempt(pool, id, "all", false, None, None, None, Some(reason)).await;
     tracing::error!("[{id}] FAILED: {reason}");
 }
 
-async fn newest(dir: &Path) -> Option<String> {
+/// Find the newest audio file in the directory tree that was modified within
+/// the last `within_secs` seconds. This is a heuristic for finding the file
+/// produced by the most recent download command, avoiding the race where a
+/// global "newest" scan picks up a file from a concurrent download.
+async fn scan_recent(dir: &Path, within_secs: u64) -> Option<String> {
     use std::collections::VecDeque;
+    let deadline =
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(within_secs))?;
     let mut best: Option<(String, std::time::SystemTime)> = None;
     let mut dirs = VecDeque::new();
     dirs.push_back(dir.to_path_buf());
-
     while let Some(d) = dirs.pop_front() {
         let mut entries = tokio::fs::read_dir(&d).await.ok()?;
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -330,11 +594,12 @@ async fn newest(dir: &Path) -> Option<String> {
             }
             if let Ok(meta) = entry.metadata().await {
                 if let Ok(mt) = meta.modified() {
-                    // Store path relative to output dir so done() can find it
-                    if let Ok(rel) = entry.path().strip_prefix(dir) {
-                        let rel_str = rel.to_string_lossy().to_string();
-                        if best.as_ref().map_or(true, |(_, p)| mt > *p) {
-                            best = Some((rel_str, mt));
+                    if mt >= deadline {
+                        if let Ok(rel) = entry.path().strip_prefix(dir) {
+                            let rel_str = rel.to_string_lossy().to_string();
+                            if best.as_ref().map_or(true, |(_, p)| mt > *p) {
+                                best = Some((rel_str, mt));
+                            }
                         }
                     }
                 }

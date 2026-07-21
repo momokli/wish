@@ -1,0 +1,30 @@
+# Deemix — Docker deployment for wish download pipeline
+# Place on projectmellon.de at /home/momo/wish/deploy/deemix/
+#
+# Start:   docker compose up -d
+# Stop:    docker compose down
+# Logs:    docker logs deemix
+# UI:      http://localhost:6595 (only reachable from server)
+# Config:  ./config/config.json (mounted into container at /config)
+# Files:   /opt/download-service/downloads (shared with wish + dufs)
+#
+# After initial start, configure Spotify plugin via UI at localhost:6595
+# and inject ARL via API:
+#   curl -X POST http://localhost:6595/api/loginArl \
+#     -H 'Content-Type: application/json' \
+#     -d '{"arl":"YOUR_DEEZER_ARL"}'
+
+services:
+  deemix:
+    container_name: deemix
+    image: registry.gitlab.com/bockiii/deemix-docker:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6595:6595"    # only localhost — behind Caddy/VPN
+    volumes:
+      - /opt/download-service/downloads:/downloads   # shared download dir
+      - ./config:/config                              # deemix settings
+    environment:
+      - PUID=911
+      - PGID=911
+      - UMASK=000

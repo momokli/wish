@@ -24,6 +24,16 @@ pub struct DownloadConfig {
     pub output_dir: PathBuf,
     #[serde(default = "default_max_per_user")]
     pub max_per_user: u32,
+    #[serde(default)]
+    pub ytdlp_cookies: Option<PathBuf>,
+    #[serde(default)]
+    pub ytdlp_proxy: Option<String>,
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: u32,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_download_timeout_secs")]
+    pub download_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,7 +47,7 @@ pub struct Config {
 }
 
 fn default_deemix_base_url() -> String {
-    "http://localhost:6596".to_string()
+    "http://localhost:6595".to_string()
 }
 
 fn default_output_dir() -> PathBuf {
@@ -46,6 +56,18 @@ fn default_output_dir() -> PathBuf {
 
 fn default_max_per_user() -> u32 {
     5
+}
+
+fn default_max_concurrent() -> u32 {
+    3
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+fn default_download_timeout_secs() -> u64 {
+    300
 }
 
 impl Config {
@@ -89,6 +111,21 @@ impl Config {
         if let Ok(val) = std::env::var("WISH_DOWNLOAD_MAX_PER_USER") {
             config.download.max_per_user = val.parse().unwrap_or(default_max_per_user());
         }
+        if let Ok(val) = std::env::var("WISH_DOWNLOAD_YTDLP_COOKIES") {
+            config.download.ytdlp_cookies = Some(PathBuf::from(val));
+        }
+        if let Ok(val) = std::env::var("WISH_DOWNLOAD_YTDLP_PROXY") {
+            config.download.ytdlp_proxy = Some(val);
+        }
+        if let Ok(val) = std::env::var("WISH_DOWNLOAD_MAX_CONCURRENT") {
+            config.download.max_concurrent = val.parse().unwrap_or(3);
+        }
+        if let Ok(val) = std::env::var("WISH_DOWNLOAD_MAX_RETRIES") {
+            config.download.max_retries = val.parse().unwrap_or(3);
+        }
+        if let Ok(val) = std::env::var("WISH_DOWNLOAD_TIMEOUT_SECS") {
+            config.download.download_timeout_secs = val.parse().unwrap_or(300);
+        }
 
         // Ensure output directory exists
         if !config.download.output_dir.exists() {
@@ -129,6 +166,11 @@ impl Default for Config {
             download: DownloadConfig {
                 output_dir: default_output_dir(),
                 max_per_user: default_max_per_user(),
+                ytdlp_cookies: None,
+                ytdlp_proxy: None,
+                max_concurrent: default_max_concurrent(),
+                max_retries: default_max_retries(),
+                download_timeout_secs: default_download_timeout_secs(),
             },
         }
     }
@@ -142,7 +184,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert!(config.spotify.client_id.is_empty());
-        assert_eq!(config.deemix.base_url, "http://localhost:6596");
+        assert_eq!(config.deemix.base_url, "http://localhost:6595");
         assert_eq!(config.download.max_per_user, 5);
         assert_eq!(config.download.output_dir, PathBuf::from("./downloads"));
     }

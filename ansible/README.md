@@ -9,9 +9,9 @@ One-command deployment of the entire Wish backend to projectmellon.de.
 pip install ansible
 
 # Deploy with secrets from environment
-WISH_SPOTIFY_CLIENT_ID=e7b09b7a085d4a029a1b454574ace53b \
-WISH_SPOTIFY_CLIENT_SECRET=a637050f76fa4f15b24f23e672bc8a9b \
-WISH_DEEMIX_ARL=1be8e7f970c14d422142026da4decece609e52b7cf95fd3e9ece087667893b0ec94f77ef8b5560b7aa4a2d6a0c031969a5ac94e797dec4984600e720973edcd149c5a0fb63bbb091392a951322be76da14c375ae3f6fc45b5daa84014f6e4fdb \
+WISH_SPOTIFY_CLIENT_ID=your_spotify_client_id \
+WISH_SPOTIFY_CLIENT_SECRET=your_spotify_client_secret \
+WISH_DEEMIX_ARL=your_deezer_arl \
   ansible-playbook -i inventory.yml playbook.yml
 
 # Redeploy just the binary (after code changes)
@@ -23,12 +23,12 @@ ansible-playbook -i inventory.yml playbook.yml --tags config
 
 ## What it sets up
 
-| Component | Port | Description |
-|---|---|---|
-| **wish** | 8700 | Rust song request server (systemd) |
-| **deemix** | 6595 | Deemix Docker container (320kbps MP3, Spotify plugin) |
-| **dufs** | 8321 | Static file server for downloads (systemd) |
-| **Caddy** | 443 | Reverse proxy (existing Docker container, routes updated) |
+| Component  | Port | Description                                               |
+| ---------- | ---- | --------------------------------------------------------- |
+| **wish**   | 8700 | Rust song request server (systemd)                        |
+| **deemix** | 6595 | Deemix Docker container (320kbps MP3, Spotify plugin)     |
+| **dufs**   | 8321 | Static file server for downloads (systemd)                |
+| **Caddy**  | 443  | Reverse proxy (existing Docker container, routes updated) |
 
 ## Tags
 

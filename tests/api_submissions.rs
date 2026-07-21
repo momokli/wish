@@ -20,10 +20,12 @@ async fn test_app(pool: SqlitePool) -> Router {
         spotify: None,
         download_notify: Arc::new(Notify::new()),
         ytdlp_available: false,
+        spotdl_available: false,
     });
     api::build_router(state)
 }
 
+/// Create an in-memory database running all migrations (001, 002, 003).
 async fn json_body(body: Body) -> Value {
     let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)

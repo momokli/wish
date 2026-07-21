@@ -1,0 +1,7 @@
+{
+  "name": "wish",
+  "private": true,
+  "devDependencies": {
+    "eslint": "^9"
+  }
+}

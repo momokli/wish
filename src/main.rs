@@ -4,6 +4,12 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use wish::config::Config;
 
+/// Seconds to wait before restarting the download worker after a crash.
+const WORKER_RESTART_DELAY_SECS: u64 = 10;
+
+/// Minutes between automatic playlist syncs.
+const PLAYLIST_SYNC_MINUTES: u64 = 10;
+
 /// Wish — Song request server.
 #[derive(Parser, Debug)]
 #[command(name = "wish", version, about)]
@@ -88,12 +94,19 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
         None
     };
 
-    // Check if yt-dlp is available on PATH
+    // Check if yt-dlp and spotdl are available on PATH
     let ytdlp_available = which::which("yt-dlp").is_ok();
     if ytdlp_available {
         tracing::info!("yt-dlp found on PATH — YouTube/SoundCloud search enabled");
     } else {
         tracing::warn!("yt-dlp not found on PATH — YouTube/SoundCloud search disabled");
+    }
+
+    let spotdl_available = which::which("spotdl").is_ok();
+    if spotdl_available {
+        tracing::info!("spotdl found on PATH — Spotify download fallback enabled");
+    } else {
+        tracing::warn!("spotdl not found on PATH — deemix is the only Spotify download option");
     }
 
     // Set up download notification channel
@@ -106,6 +119,7 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
         spotify,
         download_notify: download_notify.clone(),
         ytdlp_available,
+        spotdl_available,
     });
 
     // Build router
@@ -145,10 +159,27 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
         config.download.output_dir.clone(),
         download_notify.clone(),
         ytdlp_available,
+        config.download.ytdlp_cookies.clone(),
+        config.download.ytdlp_proxy.clone(),
+        config.download.max_concurrent as usize,
+        config.download.max_retries,
+        config.download.download_timeout_secs,
     );
+    // Download worker with auto-restart watchdog
     tokio::spawn(async move {
-        worker.run().await;
+        loop {
+            worker.run().await;
+            tracing::error!(
+                "Download worker exited unexpectedly. Restarting in {}s...",
+                WORKER_RESTART_DELAY_SECS
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(WORKER_RESTART_DELAY_SECS)).await;
+        }
     });
+
+    // Start playlist auto-sync every PLAYLIST_SYNC_MINUTES minutes
+    // (start_auto_sync handles its own internal restart loop)
+    wish::playlists::start_auto_sync(pool.clone(), download_notify.clone(), PLAYLIST_SYNC_MINUTES);
 
     // Start the server
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));

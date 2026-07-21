@@ -79,27 +79,36 @@ Dev-only env vars:
 ### Quick Orientation
 
 ```bash
-# 1. Establish build baseline
-cargo build 2>&1 | tail -5
-
-# 2. Get the CURRENT database schema
-rm -f /tmp/wish_test.db
-DATABASE_URL=sqlite:/tmp/wish_test.db cargo run -- serve &
-sleep 2
-sqlite3 /tmp/wish_test.db ".schema"
-kill %1 2>/dev/null; rm -f /tmp/wish_test.db
-
-# 3. List actual source modules
-ls src/*.rs | sort
-
-# 4. Check current git branch + dirty state
-git branch --show-current && git status --short | head -20
+# ONE command — tells you everything you need to know
+bash scripts/assess.sh
 ```
 
-### Schema Rules
+### Git Rules (MUST follow)
 
-- **Never reconstruct the schema from migration files.** Query the live DB.
-- `sqlite3 wish.db ".schema"` IS the canonical schema. Trust it over plan snippets.
+1. **Never work on `main`**. Create a feature branch: `git checkout -b feat/short-description`
+2. **Commit before spawning sub-agents**. If `scripts/assess.sh` shows >5 dirty files: `git add -A && git commit -m "snapshot: <what changed>"`
+3. **Validate before commit**: `bash scripts/validate.sh` must pass with exit code 0
+4. **Atomic commits**: one logical change per commit. Small, revertible.
+5. **Setup git hook** (once per clone):
+   ```bash
+   ln -sf ../../scripts/git-hooks/pre-commit .git/hooks/pre-commit
+   ```
+   This runs `validate.sh` before every commit. No validation = no commit.
+6. **Feature complete → merge**:
+   ```bash
+   git checkout main
+   git merge --squash feat/x
+   git commit -m "feat: <summary>"
+   git tag v0.X.0
+   git branch -d feat/x
+   ```
+
+### Migrations
+
+- **Timestamp-named**: `migrations/YYYYMMDDHHMMSS_description.sql` (e.g. `20260719000000_initial_schema.sql`)
+- **sqlx::migrate! manages everything**: just add a `.sql` file — no code changes needed. It discovers, checksums, and tracks.
+- **Never modify existing migration files** — checksums detect tampering
+- **Branch-safe**: two branches can both add migrations — they merge by timestamp order, no `001_` numbering collisions
 
 ### Testing
 
@@ -743,6 +752,60 @@ frontend correctly displays download sources. TDD: test first, fix second.
 - [x] `curl https://wish.zukkafabrik.de/health` shows all services available
 - [x] No file copying — all services write to same directory
 
+## Plan: admin-view
+
+**Status**: in-progress
+**Branch**: `feat/rust-rewrite-v1`
+**Depends on**: full-pipeline-verification
+
+### Description
+
+Add an `/admin` page with a technical table of all submissions — IDs, URLs,
+status, bitrate, container, file size, download source, per-track attempt logs.
+Built in two phases: MVP → POC.
+
+### MVP: Basic admin table
+
+#### Backend
+
+1. **Migration `002_admin_fields.sql`** — add columns:
+   - `bitrate` TEXT (e.g. "320kbps", "lossless")
+   - `container` TEXT (e.g. "mp3", "flac", "m4a")
+   - `attempts_json` TEXT (JSON array of attempt logs)
+
+2. **`src/api.rs`** — `/admin` endpoint serves embedded admin HTML
+   - `/admin/data` — JSON endpoint returning all submissions with full details
+
+3. **`src/downloader.rs`** — after each download attempt, append to `attempts_json`
+   - On success: record `{"layer": "yt-dlp", "file": "...", "bitrate": "...", "container": "mp3"}`
+   - Detect container from file extension, attempt bitrate from yt-dlp output
+
+#### Frontend
+
+4. **`frontend/admin.html`** — standalone admin page (separate from guest SPA):
+   - Dark-themed table: ID, Title, Artist, Source, Status, Bitrate, Container, Size, Via
+   - Filter by status (ready/failed/pending)
+   - Sort by any column
+   - Auto-refresh every 10s
+   - Click row → expand to show attempt logs
+
+### POC: Full admin with attempt timeline
+
+5. Store per-attempt details: command output, timing, errors
+6. Admin: timeline view showing each download attempt as a row
+7. Export as CSV
+
+### Agent Decomposition
+
+| Agent | Files                                                           | Work                                                                                         |
+| ----- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **A** | `migrations/002_admin_fields.sql`, `src/db.rs`, `src/models.rs` | DB migration, new columns, insert/update helpers                                             |
+| **B** | `src/downloader.rs`                                             | Record attempt details (bitrate, container, attempt_json) in try_spotdl/run_ytdlp/try_deemix |
+| **C** | `src/api.rs`                                                    | `/admin` + `/admin/data` endpoints, serve embedded admin.html                                |
+| **D** | `frontend/admin.html`                                           | Admin table UI with filtering, sorting, auto-refresh                                         |
+
+**Execution order**: A first (DB), then B+C+D in parallel.
+
 ---
 
 ## Completed Plans
@@ -784,3 +847,241 @@ Tests: 9 unit + 11 integration = 20 passing.
 4. If you added a new endpoint, verify with `curl` first
 5. Update `CHANGELOG.md` with your changes
 6. Bump "Last Updated" date at the top of this file
+7. Run `node scripts/lint-html.mjs frontend/*.html` — JS syntax must pass
+8. Or run everything at once: `bash scripts/validate.sh`
+
+## Deployment
+
+Target: **projectmellon.de** (Hetzner VPS), behind Caddy reverse proxy.
+
+### Infrastructure
+
+| Component        | Location                                                  |
+| ---------------- | --------------------------------------------------------- |
+| wish binary      | `/home/momo/wish/target/release/wish serve`               |
+| SQLite DB        | `/home/momo/wish/wish.db`                                 |
+| Config file      | `~/.config/wish/config.toml`                              |
+| Env vars         | systemd service file (`WISH_PORT`, `DATABASE_URL`)        |
+| deemix Docker    | `http://localhost:6595` (container `deemix`)              |
+| deemix config    | `/var/lib/docker/volumes/deemix-config/_data/config.json` |
+| spotDL           | `/srv/download-service/.venv/bin/spotdl`                  |
+| yt-dlp (nightly) | `/usr/local/bin/yt-dlp`                                   |
+| dufs file share  | `https://files.wish.zukkafabrik.de` (serves download dir) |
+| SOCKS5 proxy     | `127.0.0.1:1080` (yt-dlp routes YouTube through this)     |
+| Caddy config     | `/etc/caddy/Caddyfile`                                    |
+
+### Config
+
+**`~/.config/wish/config.toml`** (secrets — env vars override these):
+
+```toml
+[spotify]
+client_id     = "your_spotify_client_id"
+client_secret = "your_spotify_client_secret"
+
+[deemix]
+base_url = "http://localhost:6595"
+arl      = "your_deezer_arl"
+
+[download]
+output_dir    = "/opt/download-service/downloads"
+max_per_user  = 5
+```
+
+**`.env`** (repo root, optional — lower priority than system env):
+
+```env
+DATABASE_URL=sqlite:wish.db?mode=rwc
+WISH_PORT=8700
+WISH_SPOTIFY_CLIENT_ID=...
+WISH_SPOTIFY_CLIENT_SECRET=...
+WISH_DEEMIX_ARL=...
+WISH_DOWNLOAD_OUTPUT_DIR=/opt/download-service/downloads
+```
+
+See `.env.example` for all available vars.
+
+### Deploy
+
+```bash
+# 1. Push code to server
+rsync -avz src/ frontend/ migrations/ Cargo.toml .env.example root@projectmellon.de:/home/momo/wish/
+
+# 2. Build on server
+ssh root@projectmellon.de "sudo -u momo bash -c '
+  cd /home/momo/wish &&
+  export PATH=/home/momo/.cargo/bin:/srv/download-service/.venv/bin:/usr/local/bin:/usr/bin:/bin &&
+  cargo build --release
+'"
+
+# 3. Restart
+ssh root@projectmellon.de "systemctl restart wish.service"
+
+# 4. Verify
+curl https://wish.zukkafabrik.de/health | python3 -m json.tool
+```
+
+### Service file (`/etc/systemd/system/wish.service`)
+
+```ini
+[Unit]
+Description=Wish Song Request Server (Rust)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=momo
+WorkingDirectory=/home/momo/wish
+Environment=WISH_PORT=8700
+Environment=DATABASE_URL=sqlite:/home/momo/wish/wish.db?mode=rwc
+Environment=PATH=/home/momo/.cargo/bin:/srv/download-service/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/momo/wish/target/release/wish serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Logs
+
+```bash
+# Service logs
+journalctl -u wish.service --no-pager -n 50 -f
+
+# Download events only
+journalctl -u wish.service --no-pager | grep -E 'ready|FAILED'
+
+# deemix container logs
+docker logs deemix --tail 50
+```
+
+### DB inspection
+
+```bash
+ssh root@projectmellon.de "sqlite3 /home/momo/wish/wish.db"
+
+# .schema submissions
+# SELECT id,status,track_title,source,error_message FROM submissions ORDER BY id DESC;
+# SELECT id,attempts_json FROM submissions WHERE attempts_json IS NOT NULL;
+```
+
+### Deemix container
+
+```bash
+# Check config (container must be stopped to edit)
+docker exec deemix grep maxBitrate /config/config.json
+# Should show: "maxBitrate": "3" (320kbps MP3)
+
+# Inject fresh ARL
+curl -X POST http://localhost:6595/api/loginArl -H 'Content-Type: application/json' -d '{"arl":"..."}'
+```
+
+### Quick DB reset
+
+```bash
+ssh root@projectmellon.de "sqlite3 /home/momo/wish/wish.db 'DELETE FROM submissions;'"
+```
+
+### Deemix setup (from repo)
+
+Deploy via docker-compose shipped in this repo:
+
+```bash
+cd /home/momo/wish/deploy/deemix
+docker compose up -d
+```
+
+Full setup in `deploy/deemix/README.md` — key steps:
+
+1. Configure Spotify plugin via UI at `http://localhost:6595`
+2. Inject ARL: `curl -X POST http://localhost:6595/api/loginArl -H 'Content-Type: application/json' -d '{"arl":"..."}'`
+3. Verify: `curl http://localhost:6595/api/getQueue`
+
+---
+
+## Plan: subscribed-playlists
+
+**Status**: proposed
+**Branch**: `feat/rust-rewrite-v1`
+**Depends on**: rust-rewrite-v1, multi-source-search, full-pipeline-verification
+
+### Description
+
+Allow users to subscribe to playlists from Spotify, YouTube, or SoundCloud.
+Playlists are auto-synced every 10 minutes — each sync resolves playlist tracks
+and inserts NEW ones into the submissions table. Existing download pipeline
+handles them from there. No direct playlist download — playlists only feed the
+submissions queue.
+
+### Data model
+
+```sql
+CREATE TABLE playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL UNIQUE,
+    source TEXT NOT NULL,
+    title TEXT,
+    track_count INTEGER DEFAULT 0,
+    new_since_sync INTEGER DEFAULT 0,
+    last_synced INTEGER,
+    last_error TEXT,
+    created_at INTEGER DEFAULT (unixepoch())
+);
+```
+
+### API
+
+| Endpoint               | Method | Description                                                 |
+| ---------------------- | ------ | ----------------------------------------------------------- |
+| `/playlists`           | GET    | List all playlists with stats                               |
+| `/playlists`           | POST   | Add playlist `{url}` — auto-detect source, sync immediately |
+| `/playlists/{id}`      | DELETE | Remove playlist                                             |
+| `/playlists/{id}/sync` | POST   | Force resync now                                            |
+
+### Sync flow
+
+1. Fetch all track URLs from provider
+2. For each URL: insert into submissions (skip duplicates)
+3. Update `playlists.track_count`, `new_since_sync`, `last_synced`
+
+Auto-sync background task runs every 10 min for all playlists.
+
+### Files
+
+| File                           | Agent | Work                    |
+| ------------------------------ | ----- | ----------------------- |
+| `migrations/003_playlists.sql` | A     | DB schema               |
+| `src/models.rs`                | A     | Playlist types          |
+| `src/db.rs`                    | A     | playlist CRUD           |
+| `src/playlists.rs`             | B     | Sync logic per provider |
+| `src/main.rs`                  | B     | Spawn auto-sync task    |
+| `src/api.rs`                   | C     | Route handlers          |
+| `frontend/index.html`          | D     | Playlists tab UI        |
+| `frontend/admin.html`          | E     | Admin playlist view     |
+| `tests/api_playlists.rs`       | F     | Integration tests       |
+
+### Agent Decomposition
+
+- **Agent A**: Migration 003, playlist model types, playlist CRUD queries
+- **Agent B**: Sync logic (rspotify for Spotify, yt-dlp for YT/SC) + background auto-sync task
+- **Agent C**: Playlist route handlers in api.rs + wire into lib.rs
+- **Agent D**: Frontend playlists tab with add, list, delete, sync buttons
+- **Agent E**: Admin playlist section with full sync details
+- **Agent F**: Integration tests for all playlist endpoints
+
+### Execution order
+
+A first (foundation). Then B + C in parallel. Then D + E + F in parallel.
+
+### Acceptance Criteria
+
+- [ ] `POST /playlists` with Spotify/Youtube/SoundCloud URL creates a playlist
+- [ ] Initial sync adds tracks to submissions table immediately
+- [ ] Duplicates (same URL) are silently skipped
+- [ ] `GET /playlists` returns list with stats
+- [ ] Auto-sync runs every 10 minutes
+- [ ] Frontend has a "Playlists" tab
+- [ ] Admin shows playlists with sync status
+- [ ] `cargo test` passes

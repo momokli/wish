@@ -1,0 +1,15 @@
+# Local dev variant — uses ./downloads/ instead of /opt/download-service/downloads
+services:
+  deemix:
+    container_name: deemix-dev
+    image: registry.gitlab.com/bockiii/deemix-docker:latest
+    restart: "no"
+    ports:
+      - "127.0.0.1:6595:6595"
+    volumes:
+      - ./downloads:/downloads
+      - ./config:/config
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - UMASK=022

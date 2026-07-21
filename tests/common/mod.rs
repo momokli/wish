@@ -8,10 +8,8 @@ pub async fn create_test_db() -> SqlitePool {
         .await
         .expect("Failed to create test DB");
 
-    // Run migrations
-    let migration = include_str!("../../migrations/001_initial_schema.sql");
-    sqlx::query(migration)
-        .execute(&pool)
+    // Run all migrations via the canonical runner
+    wish::db::run_migrations(&pool)
         .await
         .expect("Failed to run migrations");
 

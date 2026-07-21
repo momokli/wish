@@ -19,8 +19,12 @@ pub struct Submission {
     pub filename: Option<String>,
     pub file_size: Option<i64>,
     pub error_message: Option<String>,
+    pub bitrate: Option<String>,
+    pub container: Option<String>,
+    pub attempts_json: Option<String>,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
+    pub first_available_at: Option<i64>,
 }
 
 /// Submission response sent to the frontend (subset of fields).
@@ -38,6 +42,7 @@ pub struct SubmissionResponse {
     pub file_size: Option<i64>,
     pub error_message: Option<String>,
     pub created_at: Option<i64>,
+    pub first_available_at: Option<i64>,
 }
 
 impl From<Submission> for SubmissionResponse {
@@ -54,8 +59,29 @@ impl From<Submission> for SubmissionResponse {
             file_size: s.file_size,
             error_message: s.error_message,
             created_at: s.created_at,
+            first_available_at: s.first_available_at,
         }
     }
+}
+
+/// Full admin view of a submission with all technical details.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct AdminRow {
+    pub id: i64,
+    pub track_title: Option<String>,
+    pub track_artist: Option<String>,
+    pub spotify_url: String,
+    pub source: String,
+    pub status: String,
+    pub filename: Option<String>,
+    pub file_size: Option<i64>,
+    pub error_message: Option<String>,
+    pub bitrate: Option<String>,
+    pub container: Option<String>,
+    pub attempts_json: Option<String>,
+    pub created_at: Option<i64>,
+    pub updated_at: Option<i64>,
+    pub first_available_at: Option<i64>,
 }
 
 /// A Spotify search result.
@@ -120,6 +146,29 @@ pub struct DownloadRequest {
     pub source: Option<String>,
 }
 
+/// A subscribed playlist in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Playlist {
+    pub id: i64,
+    pub url: String,
+    pub source: String,
+    pub title: Option<String>,
+    pub track_count: Option<i64>,
+    pub new_since_sync: Option<i64>,
+    pub last_synced: Option<i64>,
+    pub last_error: Option<String>,
+    pub attempts_json: Option<String>,
+    pub created_at: Option<i64>,
+}
+
+/// Request body for POST /admin/playlists.
+#[derive(Debug, Deserialize)]
+pub struct AddPlaylistRequest {
+    pub url: String,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
 /// Tracks response item for GET /tracks.
 #[derive(Debug, Serialize)]
 pub struct TrackItem {
@@ -127,4 +176,21 @@ pub struct TrackItem {
     pub size: u64,
     pub url: String,
     pub ready: bool,
+}
+
+/// Canonical source detection from a URL.
+///
+/// Used by both the download endpoint (api.rs) and playlist workflows
+/// (playlists.rs). Kept here to avoid divergent implementations.
+pub fn detect_source(url: &str) -> String {
+    let lower = url.to_lowercase();
+    if lower.contains("spotify.com") || lower.starts_with("spotify:") {
+        "spotify".to_string()
+    } else if lower.contains("youtube.com") || lower.contains("youtu.be") {
+        "youtube".to_string()
+    } else if lower.contains("soundcloud.com") {
+        "soundcloud".to_string()
+    } else {
+        "unknown".to_string()
+    }
 }

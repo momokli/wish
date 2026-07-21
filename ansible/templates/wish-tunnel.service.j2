@@ -1,0 +1,13 @@
+[Unit]
+Description=Reverse SSH tunnel for wish yt-dlp proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -N -R 9999:localhost:22 root@projectmellon.de
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

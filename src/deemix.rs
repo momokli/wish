@@ -48,6 +48,9 @@ struct DeemixActionResult {
     errid: Option<String>,
 }
 
+/// Default interval (in seconds) between deemix queue polls.
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 2;
+
 // ── Client ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -165,7 +168,7 @@ impl DeemixClient {
         timeout_secs: u64,
     ) -> anyhow::Result<Option<DeemixQueueItem>> {
         let start = std::time::Instant::now();
-        let poll_interval = std::time::Duration::from_secs(2);
+        let poll_interval = std::time::Duration::from_secs(DEFAULT_POLL_INTERVAL_SECS);
 
         loop {
             if start.elapsed().as_secs() > timeout_secs {
