@@ -271,25 +271,88 @@ async fn try_deemix(
         let _ = db::update_submission_status(pool, sub.id, "stage2_deemix", None, None, None).await;
     }
     note(pool, sub.id, "deemix", "adding to deemix queue").await;
-    deemix.add_to_queue(&sub.spotify_url).await?;
+    let uuid = deemix.add_to_queue(&sub.spotify_url).await?;
+
+    let poll_uuid = match uuid {
+        Some(ref u) => u.clone(),
+        None => {
+            // No UUID returned — item may already be queued.
+            // Search the queue for a matching title/artist.
+            note(
+                pool,
+                sub.id,
+                "deemix",
+                "no UUID from addToQueue, searching queue for match",
+            )
+            .await;
+            let map = deemix.get_queue_map().await?;
+            let found = map.iter().find(|(_, item)| {
+                let title_match = sub
+                    .track_title
+                    .as_deref()
+                    .map(|t| item.title.to_lowercase().contains(&t.to_lowercase()))
+                    .unwrap_or(false);
+                let artist_match = sub
+                    .track_artist
+                    .as_deref()
+                    .map(|a| item.artist.to_lowercase().contains(&a.to_lowercase()))
+                    .unwrap_or(false);
+                title_match && artist_match
+            });
+            match found {
+                Some((u, item)) => {
+                    tracing::info!(
+                        "Found existing deemix queue item: uuid={} title={} status={}",
+                        u,
+                        item.title,
+                        item.status
+                    );
+                    u.clone()
+                }
+                None => {
+                    anyhow::bail!(
+                        "deemix: item queued but not found in queue (no UUID, no title match)"
+                    );
+                }
+            }
+        }
+    };
+
     note(
         pool,
         sub.id,
         "deemix",
-        &format!("queued — polling for completion (timeout {timeout_secs}s)"),
+        &format!(
+            "queued uuid={} — polling for completion (timeout {timeout_secs}s)",
+            poll_uuid
+        ),
     )
     .await;
 
-    match deemix.poll_until_done(&sub.spotify_url, timeout_secs).await {
+    match deemix.poll_by_uuid(&poll_uuid, timeout_secs).await {
         Ok(Some(item))
             if item.status == "finished"
                 || item.status == "downloaded"
                 || item.status == "completed" =>
         {
-            if let Some(f) = scan_recent(dir, 5).await {
+            // Try matching the file from the deemix response first
+            if let Some(f) = item.files.first() {
+                let filename = &f.filename;
+                let full_path = dir.join(filename);
+                if full_path.exists() {
+                    tracing::info!("Deemix file found on disk: {} (from response)", filename);
+                    return done(pool, dir, sub.id, filename, "deemix").await;
+                }
+                tracing::warn!(
+                    "Deemix reported file {} but not found at {} — trying scan",
+                    filename,
+                    full_path.display()
+                );
+            }
+            if let Some(f) = scan_recent(dir, 30).await {
                 return done(pool, dir, sub.id, &f, "deemix").await;
             }
-            anyhow::bail!("deemix finished but file not found on disk (recent scan)");
+            anyhow::bail!("deemix finished but file not found on disk");
         }
         Ok(Some(item)) => {
             let msg = format!("deemix ended with status: {}", item.status);

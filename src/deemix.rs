@@ -1,6 +1,7 @@
 use anyhow::Context;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ── Models ───────────────────────────────────────────────────────────
 
@@ -26,18 +27,61 @@ pub struct DeemixUser {
     pub can_stream_lossless: Option<bool>,
 }
 
+/// A single queue item in the deemix queue.
+/// UUID is the key in the queue map — we populate it separately.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeemixQueueItem {
     #[serde(default)]
-    pub url: Option<String>,
+    pub uuid: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
     #[serde(default)]
     pub status: String,
     #[serde(default)]
-    pub track_count_total: Option<i64>,
+    pub progress: i64,
     #[serde(default)]
-    pub track_count_downloaded: Option<i64>,
+    pub size: i64,
     #[serde(default)]
-    pub errors: Vec<String>,
+    pub downloaded: i64,
+    #[serde(default)]
+    pub failed: i64,
+    #[serde(default)]
+    pub errors: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub files: Vec<DeemixFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeemixFile {
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub path: String,
+}
+
+/// The data.obj[0] field from the addToQueue response.
+#[derive(Debug, Clone, Deserialize)]
+struct DeemixQueueObject {
+    #[serde(default)]
+    uuid: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeemixAddToQueueResponse {
+    #[serde(default)]
+    result: bool,
+    #[serde(default)]
+    errid: Option<String>,
+    #[serde(default)]
+    data: Option<DeemixAddToQueueData>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeemixAddToQueueData {
+    #[serde(default)]
+    obj: Vec<DeemixQueueObject>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,7 +118,6 @@ impl DeemixClient {
     }
 
     /// Authenticate with a Deezer ARL token.
-    /// POST `/api/loginArl` — returns user info on success.
     pub async fn login_arl(&self, arl: &str) -> anyhow::Result<DeemixLoginResponse> {
         let body = serde_json::json!({"status": 1, "arl": arl});
         let resp = self
@@ -96,8 +139,9 @@ impl DeemixClient {
     }
 
     /// Add a URL to the deemix download queue.
-    /// Returns Ok(()) on `result: true`, fails otherwise.
-    pub async fn add_to_queue(&self, url: &str) -> anyhow::Result<()> {
+    /// Returns the UUID of the queued item (extracted from data.obj[0].uuid).
+    /// If the item was already queued, obj may be empty and we try to find it by searching the queue.
+    pub async fn add_to_queue(&self, url: &str) -> anyhow::Result<Option<String>> {
         let body = serde_json::json!({"url": url});
         let resp = self
             .client
@@ -112,12 +156,40 @@ impl DeemixClient {
             .await
             .context("Failed to read addToQueue body")?;
 
+        // First try the full addToQueue response (includes data.obj)
+        if let Ok(full) = serde_json::from_str::<DeemixAddToQueueResponse>(&text) {
+            if full.result {
+                if let Some(uuid) = full
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.obj.first())
+                    .map(|o| o.uuid.clone())
+                {
+                    if !uuid.is_empty() {
+                        tracing::info!("Added to deemix queue: {} (uuid={})", url, uuid);
+                        return Ok(Some(uuid));
+                    }
+                }
+                // obj was empty — item may already be queued. Try finding it in current queue.
+                tracing::info!(
+                    "Added to deemix queue (duplicate or already queued): {}",
+                    url
+                );
+                return Ok(None);
+            }
+            anyhow::bail!(
+                "Deemix addToQueue failed: {}",
+                full.errid.as_deref().unwrap_or("unknown error")
+            );
+        }
+
+        // Fallback: try simple action result
         let result: DeemixActionResult = serde_json::from_str(&text)
             .with_context(|| format!("Failed to parse addToQueue response: {}", text))?;
 
         if result.result {
             tracing::info!("Added to deemix queue: {}", url);
-            Ok(())
+            Ok(None)
         } else {
             anyhow::bail!(
                 "Deemix addToQueue failed: {}",
@@ -126,8 +198,8 @@ impl DeemixClient {
         }
     }
 
-    /// Get the current deemix queue.
-    pub async fn get_queue(&self) -> anyhow::Result<Vec<DeemixQueueItem>> {
+    /// Get the full deemix queue, UUID-keyed.
+    pub async fn get_queue_map(&self) -> anyhow::Result<HashMap<String, DeemixQueueItem>> {
         let resp = self
             .client
             .get(format!("{}/api/getQueue", self.base_url))
@@ -135,36 +207,34 @@ impl DeemixClient {
             .await
             .context("Failed to GET getQueue")?;
 
-        // Response is { "queue": { "uuid": { ... }, ... } }
         let text = resp.text().await.context("Failed to read getQueue body")?;
         let v: serde_json::Value =
             serde_json::from_str(&text).context("Failed to parse getQueue response")?;
 
-        let items: Vec<DeemixQueueItem> = v
-            .get("queue")
-            .and_then(|q| q.as_object())
-            .map(|obj| {
-                obj.values()
-                    .filter_map(|item| serde_json::from_value(item.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut map = HashMap::new();
+        if let Some(queue) = v.get("queue").and_then(|q| q.as_object()) {
+            for (uuid, item_json) in queue {
+                if let Ok(mut item) = serde_json::from_value::<DeemixQueueItem>(item_json.clone()) {
+                    item.uuid = uuid.clone();
+                    map.insert(uuid.clone(), item);
+                }
+            }
+        }
 
-        Ok(items)
+        Ok(map)
     }
 
-    /// Find an item in the queue by URL.
-    pub async fn find_by_url(&self, url: &str) -> anyhow::Result<Option<DeemixQueueItem>> {
-        let queue = self.get_queue().await?;
-        Ok(queue
-            .into_iter()
-            .find(|item| item.url.as_deref() == Some(url)))
+    /// Get the queue as a flat list.
+    pub async fn get_queue(&self) -> anyhow::Result<Vec<DeemixQueueItem>> {
+        let map = self.get_queue_map().await?;
+        Ok(map.into_values().collect())
     }
 
-    /// Poll until the item is done, with timeout in seconds.
-    pub async fn poll_until_done(
+    /// Poll until the item identified by UUID reaches a terminal status.
+    /// Returns the final queue item.
+    pub async fn poll_by_uuid(
         &self,
-        url: &str,
+        uuid: &str,
         timeout_secs: u64,
     ) -> anyhow::Result<Option<DeemixQueueItem>> {
         let start = std::time::Instant::now();
@@ -172,36 +242,36 @@ impl DeemixClient {
 
         loop {
             if start.elapsed().as_secs() > timeout_secs {
-                anyhow::bail!("Timeout waiting for deemix to process: {}", url);
+                anyhow::bail!("Timeout waiting for deemix to process uuid={}", uuid);
             }
 
-            let queue = self.get_queue().await?;
+            let map = self.get_queue_map().await?;
 
-            // Find by URL, or grab any terminal item as fallback
-            let item = queue
-                .iter()
-                .find(|item| item.url.as_deref() == Some(url))
-                .or_else(|| {
-                    queue.iter().find(|i| {
-                        !matches!(
-                            i.status.as_str(),
-                            "queued" | "downloading" | "converting" | "processing"
-                        )
-                    })
-                })
-                .cloned();
-
-            if let Some(item) = item {
+            if let Some(item) = map.get(uuid) {
                 match item.status.as_str() {
-                    "queued" | "downloading" | "converting" | "processing" => {
-                        tracing::debug!("Deemix status for {}: {}", url, item.status);
+                    "queued"
+                    | "downloading"
+                    | "con
+verting"
+                    | "processing" => {
+                        tracing::debug!(
+                            "Deemix uuid={} status={} progress={}%",
+                            uuid,
+                            item.status,
+                            item.progress
+                        );
                         tokio::time::sleep(poll_interval).await;
                     }
-                    _ => return Ok(Some(item)),
+                    status => {
+                        tracing::info!("Deemix uuid={} finished with status={}", uuid, status);
+                        return Ok(Some(item.clone()));
+                    }
                 }
+            } else {
+                // UUID not in queue yet — it might still be resolving
+                tracing::debug!("Deemix uuid={} not yet in queue, waiting...", uuid);
+                tokio::time::sleep(poll_interval).await;
             }
-
-            tokio::time::sleep(poll_interval).await;
         }
     }
 }
