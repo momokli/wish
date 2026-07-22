@@ -488,7 +488,7 @@
         state: started
         restart_policy: unless-stopped
         ports:
-          - "127.0.0.1:6598:6595"
+          - "6598:6595"
         volumes:
           - /opt/music-stack/deemix-wish-config:/config
           - /opt/music-stack/wish-downloads:/downloads

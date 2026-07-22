@@ -275,3 +275,23 @@ verting"
         }
     }
 }
+
+/// Clear stale queue items from previous runs.
+/// Called at startup to prevent old completed items from being matched.
+pub async fn clear_stale_queue() -> anyhow::Result<()> {
+    let queue_dir = std::path::Path::new("/opt/music-stack/deemix-wish-config/queue");
+    if queue_dir.exists() {
+        let mut entries = tokio::fs::read_dir(queue_dir).await?;
+        let mut count = 0usize;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_type().await?.is_file() {
+                tokio::fs::remove_file(entry.path()).await?;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            tracing::info!("Cleared {} stale items from deemix queue", count);
+        }
+    }
+    Ok(())
+}

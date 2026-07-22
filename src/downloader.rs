@@ -323,7 +323,14 @@ async fn try_deemix(
                 )
                 .await;
                 let map = deemix.get_queue_map().await?;
+                // Only match items that are still in progress (not already completed from a previous run)
                 let found = map.iter().find(|(_, item)| {
+                    if matches!(
+                        item.status.as_str(),
+                        "completed" | "finished" | "failed" | "error" | "cancelled"
+                    ) {
+                        return false; // skip already-terminal items from old runs
+                    }
                     let title_match = sub
                         .track_title
                         .as_deref()
@@ -339,7 +346,7 @@ async fn try_deemix(
                 match found {
                     Some((u, item)) => {
                         tracing::info!(
-                            "Found existing deemix queue item: uuid={} title={} status={}",
+                            "Found in-progress deemix queue item: uuid={} title={} status={}",
                             u,
                             item.title,
                             item.status
@@ -347,9 +354,16 @@ async fn try_deemix(
                         u.clone()
                     }
                     None => {
-                        anyhow::bail!(
-                            "deemix: item queued but not found in queue (no UUID, no title match)"
-                        );
+                        // Track was a duplicate in deemix but already completed.
+                        // Don't try to match old files — fall through to spotDL.
+                        note(
+                            pool,
+                            sub.id,
+                            "deemix",
+                            "track already completed in deemix queue — falling back to spotDL",
+                        )
+                        .await;
+                        anyhow::bail!("deemix: duplicate track already completed, no new download");
                     }
                 }
             }
