@@ -1,5 +1,5 @@
 use sqlx::sqlite::SqlitePool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
@@ -75,6 +75,35 @@ impl DownloadWorker {
         }
         tracing::info!("Processing {} pending", pending.len());
 
+        // ── Phase 1: burst-enqueue ALL Spotify URLs to deemix (fire-and-forget) ──
+        let mut uuids: HashMap<i64, Option<String>> = HashMap::new();
+        let spotify_count = pending.iter().filter(|s| s.source == "spotify").count();
+        if spotify_count > 0 {
+            tracing::info!("Burst-enqueueing {} Spotify URLs to deemix", spotify_count);
+            for sub in &pending {
+                if sub.source == "spotify" {
+                    match self.deemix.add_to_queue(&sub.spotify_url).await {
+                        Ok(uuid) => {
+                            uuids.insert(sub.id, uuid.clone());
+                            if let Some(ref u) = uuid {
+                                tracing::info!("[{}] enqueued to deemix (uuid={})", sub.id, u);
+                            } else {
+                                tracing::info!(
+                                    "[{}] enqueued to deemix (duplicate/already there)",
+                                    sub.id
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("[{}] deemix enqueue failed: {e}", sub.id);
+                            uuids.insert(sub.id, None);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Phase 2: poll + fallbacks concurrently ──
         let pool = self.pool.clone();
         let deemix = self.deemix.clone();
         let dir = self.output_dir.clone();
@@ -86,7 +115,6 @@ impl DownloadWorker {
         let mut set = JoinSet::new();
         let mut n = 0usize;
         for sub in pending {
-            // Skip if this submission is already being processed by another cycle
             let id = sub.id;
             {
                 let mut guard = in_flight.lock().await;
@@ -104,6 +132,7 @@ impl DownloadWorker {
             let f_proxy = proxy.clone();
             let f_max_retries = self.max_retries;
             let f_timeout_secs = self.download_timeout_secs;
+            let f_uuid = uuids.remove(&id).flatten();
             set.spawn(async move {
                 process_one(
                     f_pool,
@@ -115,6 +144,7 @@ impl DownloadWorker {
                     f_max_retries,
                     f_timeout_secs,
                     sub,
+                    f_uuid,
                 )
                 .await;
                 f_in_flight.lock().await.remove(&id);
@@ -141,20 +171,20 @@ async fn process_one(
     max_retries: u32,
     timeout_secs: u64,
     sub: crate::models::Submission,
+    pre_enqueued_uuid: Option<String>,
 ) {
     let id = sub.id;
     let src = sub.source.as_str();
     let url = &sub.spotify_url;
     tracing::info!("[{id}] {src}: {url}");
 
-    // Live: pipeline started
     note(&pool, id, "start", &format!("{src} pipeline starting")).await;
 
     match src {
         "spotify" => {
-            // L1: deemix (320kbps, best quality)
-            note(&pool, id, "deemix", "starting deemix (320kbps)").await;
-            if try_deemix(&pool, &deemix, &dir, &sub, timeout_secs)
+            // L1: deemix — uses pre-enqueued UUID from burst phase
+            note(&pool, id, "deemix", "polling deemix").await;
+            if try_deemix(&pool, &deemix, &dir, &sub, timeout_secs, pre_enqueued_uuid)
                 .await
                 .is_ok()
             {
@@ -260,59 +290,67 @@ async fn process_one(
 
 // ── Layers ──
 
+/// Try deemix download. If `pre_enqueued_uuid` is set (from the burst phase),
+/// skips add_to_queue and goes straight to polling.
 async fn try_deemix(
     pool: &SqlitePool,
     deemix: &DeemixClient,
     dir: &Path,
     sub: &crate::models::Submission,
     timeout_secs: u64,
+    pre_enqueued_uuid: Option<String>,
 ) -> anyhow::Result<()> {
     if sub.filename.is_none() {
         let _ = db::update_submission_status(pool, sub.id, "stage2_deemix", None, None, None).await;
     }
-    note(pool, sub.id, "deemix", "adding to deemix queue").await;
-    let uuid = deemix.add_to_queue(&sub.spotify_url).await?;
 
-    let poll_uuid = match uuid {
-        Some(ref u) => u.clone(),
-        None => {
-            // No UUID returned — item may already be queued.
-            // Search the queue for a matching title/artist.
-            note(
-                pool,
-                sub.id,
-                "deemix",
-                "no UUID from addToQueue, searching queue for match",
-            )
-            .await;
-            let map = deemix.get_queue_map().await?;
-            let found = map.iter().find(|(_, item)| {
-                let title_match = sub
-                    .track_title
-                    .as_deref()
-                    .map(|t| item.title.to_lowercase().contains(&t.to_lowercase()))
-                    .unwrap_or(false);
-                let artist_match = sub
-                    .track_artist
-                    .as_deref()
-                    .map(|a| item.artist.to_lowercase().contains(&a.to_lowercase()))
-                    .unwrap_or(false);
-                title_match && artist_match
-            });
-            match found {
-                Some((u, item)) => {
-                    tracing::info!(
-                        "Found existing deemix queue item: uuid={} title={} status={}",
-                        u,
-                        item.title,
-                        item.status
-                    );
-                    u.clone()
-                }
-                None => {
-                    anyhow::bail!(
-                        "deemix: item queued but not found in queue (no UUID, no title match)"
-                    );
+    let poll_uuid = if let Some(uuid) = pre_enqueued_uuid {
+        // Already enqueued in the burst phase — go straight to polling
+        tracing::info!("[{}] using pre-enqueued deemix uuid={}", sub.id, uuid);
+        uuid
+    } else {
+        // No pre-enqueued UUID — enqueue now (fallback for retries)
+        note(pool, sub.id, "deemix", "adding to deemix queue").await;
+        let uuid = deemix.add_to_queue(&sub.spotify_url).await?;
+        match uuid {
+            Some(ref u) => u.clone(),
+            None => {
+                note(
+                    pool,
+                    sub.id,
+                    "deemix",
+                    "no UUID from addToQueue, searching queue for match",
+                )
+                .await;
+                let map = deemix.get_queue_map().await?;
+                let found = map.iter().find(|(_, item)| {
+                    let title_match = sub
+                        .track_title
+                        .as_deref()
+                        .map(|t| item.title.to_lowercase().contains(&t.to_lowercase()))
+                        .unwrap_or(false);
+                    let artist_match = sub
+                        .track_artist
+                        .as_deref()
+                        .map(|a| item.artist.to_lowercase().contains(&a.to_lowercase()))
+                        .unwrap_or(false);
+                    title_match && artist_match
+                });
+                match found {
+                    Some((u, item)) => {
+                        tracing::info!(
+                            "Found existing deemix queue item: uuid={} title={} status={}",
+                            u,
+                            item.title,
+                            item.status
+                        );
+                        u.clone()
+                    }
+                    None => {
+                        anyhow::bail!(
+                            "deemix: item queued but not found in queue (no UUID, no title match)"
+                        );
+                    }
                 }
             }
         }
@@ -322,10 +360,7 @@ async fn try_deemix(
         pool,
         sub.id,
         "deemix",
-        &format!(
-            "queued uuid={} — polling for completion (timeout {timeout_secs}s)",
-            poll_uuid
-        ),
+        &format!("polling uuid={} (timeout {timeout_secs}s)", poll_uuid),
     )
     .await;
 
@@ -335,7 +370,6 @@ async fn try_deemix(
                 || item.status == "downloaded"
                 || item.status == "completed" =>
         {
-            // Try matching the file from the deemix response first
             if let Some(f) = item.files.first() {
                 let filename = &f.filename;
                 let full_path = dir.join(filename);
@@ -432,6 +466,7 @@ async fn try_spotdl(
     anyhow::bail!("spotDL failed after {max_retries} attempts");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ytdlp(
     pool: &SqlitePool,
     dir: &Path,
@@ -480,9 +515,8 @@ async fn run_ytdlp(
 
                 // Persist artist/title from filename if not already set
                 let stem = name.rsplitn(2, '.').nth(1).unwrap_or(&name);
-                if let Some((artist, title)) = parse_stem_title(stem) {
-                    let _ = db::update_track_metadata(pool, id, &title, artist.as_deref()).await;
-                }
+                let (artist_opt, title) = parse_stem_title(stem);
+                let _ = db::update_track_metadata(pool, id, &title, artist_opt.as_deref()).await;
 
                 return done(pool, dir, id, &name, "yt-dlp").await;
             }
@@ -503,21 +537,27 @@ async fn run_ytdlp(
 }
 
 /// Parse "Artist - Title" or "Unknown Artist - Title" from a yt-dlp filename stem.
-fn parse_stem_title(stem: &str) -> Option<(Option<String>, String)> {
+/// Returns (artist_opt, title).
+fn parse_stem_title(stem: &str) -> (Option<String>, String) {
     // Strip trailing " [id]" if present
-    let without_id = stem.rsplitn(2, " [").next()?;
-    without_id.split_once(" - ").map(|(artist, title)| {
-        let artist = match artist {
-            "NA" | "Unknown Artist" => None,
-            a => Some(a.to_string()),
-        };
-        (artist, title.to_string())
-    })
+    let without_id = match stem.rsplitn(2, " [").next() {
+        Some(s) => s,
+        None => return (None, stem.to_string()),
+    };
+    match without_id.split_once(" - ") {
+        Some((artist, title)) => {
+            let artist = match artist {
+                "NA" | "Unknown Artist" => None,
+                a => Some(a.to_string()),
+            };
+            (artist, title.to_string())
+        }
+        None => (None, without_id.to_string()),
+    }
 }
 
 // ── Helpers ──
 
-/// Log a pipeline note (visible in admin logs immediately).
 async fn note(pool: &SqlitePool, id: i64, layer: &str, msg: &str) {
     let _ = db::append_attempt(pool, id, layer, false, None, None, None, Some(msg)).await;
 }
@@ -557,8 +597,11 @@ async fn done(
     let note = format!("downloaded via {stage}");
     db::update_submission_status(pool, id, "ready", Some(name), sz, Some(&note)).await?;
     let _ = sqlx::query(
-        "UPDATE submissions SET first_available_at = COALESCE(first_available_at, unixepoch()) WHERE id = ?"
-    ).bind(id).execute(pool).await;
+        "UPDATE submissions SET first_available_at = COALESCE(first_available_at, unixepoch()) WHERE id = ?",
+    )
+    .bind(id)
+    .execute(pool)
+    .await;
     let _ = db::append_attempt(
         pool,
         id,
@@ -570,20 +613,16 @@ async fn done(
         None,
     )
     .await;
-    tracing::info!("[{id}] ready [{stage}] {name}");
+    tracing::info!("[{id}] ready [{stage}] {name}",);
     Ok(())
 }
 
-async fn fail(pool: &SqlitePool, id: i64, reason: &str) {
-    let _ = db::update_submission_status(pool, id, "failed", None, None, Some(reason)).await;
-    let _ = db::append_attempt(pool, id, "all", false, None, None, None, Some(reason)).await;
-    tracing::error!("[{id}] FAILED: {reason}");
+async fn fail(pool: &SqlitePool, id: i64, msg: &str) {
+    let _ = db::update_submission_status(pool, id, "failed", None, None, Some(msg)).await;
+    let _ = db::append_attempt(pool, id, "fail", false, None, None, None, Some(msg)).await;
+    tracing::error!("[{id}] FAILED: {msg}");
 }
 
-/// Find the newest audio file in the directory tree that was modified within
-/// the last `within_secs` seconds. This is a heuristic for finding the file
-/// produced by the most recent download command, avoiding the race where a
-/// global "newest" scan picks up a file from a concurrent download.
 async fn scan_recent(dir: &Path, within_secs: u64) -> Option<String> {
     use std::collections::VecDeque;
     let deadline =
