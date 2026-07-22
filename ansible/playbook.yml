@@ -462,6 +462,71 @@
       until: health is success
       tags: [verify]
 
+    - name: Create deemix-wish config directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /opt/music-stack/deemix-wish-config/spotify
+        - /opt/music-stack/wish-downloads
+      tags: [deemix]
+
+    - name: Clone deemix-128 config for deemix-wish
+      ansible.builtin.shell: |
+        if [ -f /opt/music-stack/deemix-128-config/config.json ]; then
+          cp -n /opt/music-stack/deemix-128-config/config.json /opt/music-stack/deemix-wish-config/config.json
+          cp -n /opt/music-stack/deemix-128-config/spotify/config.json /opt/music-stack/deemix-wish-config/spotify/config.json
+        fi
+      changed_when: false
+      tags: [deemix]
+
+    - name: Start deemix-wish container
+      community.docker.docker_container:
+        name: deemix-wish
+        image: registry.gitlab.com/bockiii/deemix-docker:latest
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "127.0.0.1:6598:6595"
+        volumes:
+          - /opt/music-stack/deemix-wish-config:/config
+          - /opt/music-stack/wish-downloads:/downloads
+        env:
+          PUID: "1000"
+          PGID: "1000"
+          UMASK: "000"
+      tags: [deemix]
+
+    - name: Authenticate deemix-wish with ARL
+      ansible.builtin.uri:
+        url: "http://localhost:6598/api/loginArl"
+        method: POST
+        body_format: json
+        body:
+          status: 1
+          arl: "{{ deemix_arl }}"
+        status_code: 200
+      register: deemix_wish_auth
+      retries: 5
+      delay: 3
+      until: deemix_wish_auth is success
+      tags: [deemix]
+
+    - name: Restart dufs with wish-downloads volume
+      community.docker.docker_container:
+        name: dufs
+        image: sigoden/dufs
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "0.0.0.0:5000:5000"
+        volumes:
+          - /data/public/media/music:/data
+          - /opt/music-stack/wish-downloads:/data/wish
+        command: /data -A
+      tags: [dufs]
+
   handlers:
     - name: restart wish
       ansible.builtin.systemd:
