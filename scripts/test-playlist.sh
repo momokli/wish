@@ -229,7 +229,7 @@ validate_run() {
 
 reset_state() {
     log "Resetting DB and downloads via SSH..."
-    if ! ssh -o ConnectTimeout=5 "$MUSIC_HOST" "sudo systemctl stop wish.service && rm -f /home/momo/wish/wish.db* /opt/music-stack/wish-downloads/*.mp3 && sudo systemctl start wish.service && echo ok" 2>/dev/null; then
+    if ! ssh -o ConnectTimeout=5 "$MUSIC_HOST" "sudo systemctl stop wish.service && rm -f /home/momo/wish/wish.db* /opt/music-stack/wish-downloads/*.mp3 /opt/music-stack/deemix-wish-config/queue/*.json && docker restart deemix-wish && sleep 2 && sudo systemctl start wish.service && echo ok" 2>/dev/null; then
         warn "SSH reset failed — trying manual..."
         warn "ssh $MUSIC_HOST 'sudo systemctl stop wish && rm -f /home/momo/wish/wish.db* /opt/music-stack/wish-downloads/*.mp3 && sudo systemctl start wish'"
         warn "Press enter after resetting..."
