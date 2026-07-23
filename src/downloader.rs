@@ -570,6 +570,72 @@ async fn done(
     )
     .await;
     tracing::info!("[{id}] ready [{stage}] {name}",);
+
+    // ISRC safety net: if this file's ISRC belongs to a different submission, reassign
+    let full = dir.join(name);
+    if let Ok(Some(file_isrc)) = extract_isrc(&full).await {
+        let expected: Option<String> =
+            sqlx::query_scalar("SELECT isrc FROM submissions WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+
+        if let Some(ref exp) = expected {
+            if !file_isrc.eq_ignore_ascii_case(exp) {
+                // Wrong file assigned — find the correct submission
+                if let Ok(Some(correct_id)) = sqlx::query_scalar::<_, i64>(
+                    "SELECT id FROM submissions WHERE isrc = ? AND id != ?",
+                )
+                .bind(&file_isrc)
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                {
+                    tracing::warn!(
+                        "[{id}] ISRC mismatch: file={file_isrc} sub={exp} → reassigning to {correct_id}"
+                    );
+                    let c = name.split('.').last().map(|e| e.to_lowercase());
+                    let corr_sz = tokio::fs::metadata(&full)
+                        .await
+                        .ok()
+                        .map(|m| m.len() as i64);
+                    let note = format!("downloaded via {stage} (ISRC-corrected)");
+                    let _ = db::update_submission_status(
+                        pool,
+                        correct_id,
+                        "ready",
+                        Some(name),
+                        corr_sz,
+                        Some(&note),
+                    )
+                    .await;
+                    let _ = db::append_attempt(
+                        pool,
+                        correct_id,
+                        stage,
+                        true,
+                        Some(name),
+                        None,
+                        c.as_deref(),
+                        None,
+                    )
+                    .await;
+                    let _ = db::update_submission_status(
+                        pool,
+                        id,
+                        "pending",
+                        None,
+                        None,
+                        Some("ISRC mismatch — reassigned"),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -589,6 +655,30 @@ async fn find_by_prefix(dir: &Path, prefix: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract ISRC from an audio file via ffprobe (TSRC ID3 frame).
+async fn extract_isrc(path: &Path) -> anyhow::Result<Option<String>> {
+    let output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-show_entries",
+            "format_tags=TSRC",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .await?;
+
+    if output.status.success() {
+        let tsrc = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !tsrc.is_empty() && tsrc.len() >= 8 {
+            return Ok(Some(tsrc));
+        }
+    }
+    Ok(None)
 }
 
 async fn scan_recent(dir: &Path, within_secs: u64) -> Option<String> {
