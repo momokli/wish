@@ -401,6 +401,29 @@ async fn try_spotdl(
             .await
             .map_err(|_| anyhow::anyhow!("spotDL timed out after {timeout_secs}s"))??;
         if o.status.success() {
+            // Parse the downloaded filename from spotDL stdout.
+            // spotDL 4.x prints: Downloaded "Artist - Title":  \n  https://...
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if let Some(name) = stdout
+                .lines()
+                .find(|l| l.trim().starts_with("Downloaded"))
+                .and_then(|l| l.split('"').nth(1))
+            {
+                // Build expected file from the quoted title + .mp3 extension
+                let expected = format!("{name}.mp3");
+                let full_path = dir.join(&expected);
+                if full_path.exists() {
+                    tracing::info!("[{}] spotDL downloaded: {}", sub.id, expected);
+                    return done(pool, dir, sub.id, &expected, "spotDL").await;
+                }
+                // The quoted name might differ from the file — try glob match
+                tracing::debug!(
+                    "[{}] spotDL quoted '{}' not found as file, scanning",
+                    sub.id,
+                    name
+                );
+            }
+            // Fallback: scan recent files (only those newer than command start)
             if let Some(f) = scan_recent(dir, 5).await {
                 return done(pool, dir, sub.id, &f, "spotDL").await;
             }
