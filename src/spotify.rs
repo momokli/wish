@@ -127,6 +127,15 @@ pub fn parse_spotify_track_id(url: &str) -> Option<String> {
     None
 }
 
+/// Convert a spotify:track:ID URI to an https://open.spotify.com/track/ID URL.
+/// spotDL misresolves URIs but handles HTTPS URLs fine.
+pub fn spotify_uri_to_url(uri: &str) -> String {
+    if let Some(id) = uri.strip_prefix("spotify:track:") {
+        return format!("https://open.spotify.com/track/{id}");
+    }
+    uri.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

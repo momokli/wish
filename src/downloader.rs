@@ -384,11 +384,12 @@ async fn try_spotdl(
             &format!("attempt {a}/{max_retries}"),
         )
         .await;
+        let spotify_url = crate::spotify::spotify_uri_to_url(&sub.spotify_url);
         tracing::info!("[{}] spotDL {a}/{max_retries}", sub.id);
         let fut = tokio::process::Command::new("spotdl")
             .args([
                 "download",
-                &sub.spotify_url,
+                &spotify_url,
                 "--output",
                 &fmt,
                 "--bitrate",
