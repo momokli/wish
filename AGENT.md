@@ -1,12 +1,82 @@
 # Wish — Agent Guidance
 
-> **Last Updated**: 2026-07-23 — v0.6.2 (deemix polling fix)
+> **Last Updated**: 2026-07-23 — v0.7.0 (deemix investigation complete, next: v0.8.0 architecture)
 
 ---
 
 # Section 1: Agent Reference
 
 This section is **static** — it's the system prompt for any agent working on this project.
+
+---
+
+## ⚠ Critical Findings (do not lose track)
+
+### Deemix polling gap
+
+`add_to_queue` auto-re-auths on `NotLoggedIn`. `poll_by_uuid → get_queue_map` did NOT — when session expired, `/api/getQueue` returned `{"queue":{}}` (empty), UUID wasn't found, poll loop ran until timeout (120s) while deemix had already finished.
+
+- **Evidence**: Rollergirl "Dear Jessie" — UUID obtained, file appeared via deemix, but submission assigned to spotDL copy.
+- **Fix**: `get_queue_map` now detects empty queue, re-auths, retries once.
+
+### ISRC tracking
+
+- `submissions.isrc` populated from Spotify API at submission time.
+- Deemix downloads contain `TSRC` ID3v2 frame (extractable via ffprobe).
+- ISRC safety net in `done()` extracts ISRC from file, verifies against `submissions.isrc`, reassigns on mismatch.
+
+### Queue purge
+
+Deemix queue persists across restarts. Must `docker stop → rm queue/ → docker start`. Not `docker restart`.
+
+### Deemix permanent failures
+
+Two tracks always fail: "The Way I Are" (DZ 180606), "The Rhythm Of The Night" (DZ 472400362). Error: `Cannot read properties of undefined`. Always fall through to spotDL.
+
+### Track variance (from 2-run analysis)
+
+Saved DBs: `wish_run1.db`, `wish_run2.db` on music host.
+
+- **2 permanent deemix failures**: The Way I Are, The Rhythm Of The Night
+- **3 always spotDL**: Dear Jessie, När vindarna viskar mitt namn, Feel It In Your Soul
+- **9 variance tracks**: Bette Davis Eyes, Ayla, Turquoise, Irreversible, Slumber Party, Call on Me, The Riddle, This Is The Pope, Tonight (We Are Young)
+
+Variance likely caused by file-visibility timing (deemix reports completed but file not yet on host filesystem via Docker volume).
+
+---
+
+## v0.8.0 Architecture Vision (for next thread)
+
+### File serving via Rust
+
+Replace dufs with Rust-based file serving from SQLite. Single endpoint:
+
+- `grant.wish.zukkafabrik.de/mp3` — file listing + download with API key auth
+
+### Separate download dirs, symlinked "best"
+
+- Deemix downloads: `/opt/music-stack/wish-downloads/deemix/`
+- spotDL downloads: `/opt/music-stack/wish-downloads/spotdl/`
+- Symlink: if both deemix and spotDL download same track (by ISRC), symlink from spotdl/ → deemix/ for the better version
+
+### Comment column
+
+Files table has a `comment` column. Initially placeholder, later data-driven:
+
+- Which playlists contain this track
+- Track metadata cross-references
+
+### Spotify OAuth user page
+
+- Users can auth via Spotify OAuth
+- Auto-ingest all their liked and created playlists
+- Receive an API key for programmatic access
+- The comment column prints playlist names each track belongs to
+
+### Solidify spotify_id → file_id tracking
+
+Current state: ISRC column populated, deemix_queue_id + deezer_track_id populated. ISRC is the cross-provider key.
+Need to verify: playlist sync also populates ISRC (currently only direct `/download` submissions do).
 
 ---
 
