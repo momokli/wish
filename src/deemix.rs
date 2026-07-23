@@ -2,6 +2,8 @@ use anyhow::Context;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 // ── Models ───────────────────────────────────────────────────────────
 
@@ -100,6 +102,7 @@ pub struct DeemixClient {
     base_url: String,
     client: Client,
     arl: String,
+    auth_lock: Arc<Mutex<()>>,
 }
 
 impl DeemixClient {
@@ -112,6 +115,7 @@ impl DeemixClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
             arl,
+            auth_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -170,6 +174,9 @@ impl DeemixClient {
             }
             // Check for NotLoggedIn — re-auth and retry once
             if full.errid.as_deref() == Some("NotLoggedIn") {
+                // Serialize re-auth to prevent concurrent requests from
+                // stomping each other's session cookies.
+                let _guard = self.auth_lock.lock().await;
                 tracing::warn!("Deemix session expired, re-authenticating...");
                 self.login_arl(&self.arl).await?;
                 // Retry once inline
