@@ -1,5 +1,5 @@
 use sqlx::sqlite::SqlitePool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
@@ -75,35 +75,6 @@ impl DownloadWorker {
         }
         tracing::info!("Processing {} pending", pending.len());
 
-        // ── Phase 1: burst-enqueue ALL Spotify URLs to deemix (fire-and-forget) ──
-        let mut uuids: HashMap<i64, Option<String>> = HashMap::new();
-        let spotify_count = pending.iter().filter(|s| s.source == "spotify").count();
-        if spotify_count > 0 {
-            tracing::info!("Burst-enqueueing {} Spotify URLs to deemix", spotify_count);
-            for sub in &pending {
-                if sub.source == "spotify" {
-                    match self.deemix.add_to_queue(&sub.spotify_url).await {
-                        Ok(uuid) => {
-                            uuids.insert(sub.id, uuid.clone());
-                            if let Some(ref u) = uuid {
-                                tracing::info!("[{}] enqueued to deemix (uuid={})", sub.id, u);
-                            } else {
-                                tracing::info!(
-                                    "[{}] enqueued to deemix (duplicate/already there)",
-                                    sub.id
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("[{}] deemix enqueue failed: {e}", sub.id);
-                            uuids.insert(sub.id, None);
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Phase 2: poll + fallbacks concurrently ──
         let pool = self.pool.clone();
         let deemix = self.deemix.clone();
         let dir = self.output_dir.clone();
@@ -132,7 +103,6 @@ impl DownloadWorker {
             let f_proxy = proxy.clone();
             let f_max_retries = self.max_retries;
             let f_timeout_secs = self.download_timeout_secs;
-            let f_uuid = uuids.remove(&id).flatten();
             set.spawn(async move {
                 process_one(
                     f_pool,
@@ -144,7 +114,6 @@ impl DownloadWorker {
                     f_max_retries,
                     f_timeout_secs,
                     sub,
-                    f_uuid,
                 )
                 .await;
                 f_in_flight.lock().await.remove(&id);
@@ -171,7 +140,6 @@ async fn process_one(
     max_retries: u32,
     timeout_secs: u64,
     sub: crate::models::Submission,
-    pre_enqueued_uuid: Option<String>,
 ) {
     let id = sub.id;
     let src = sub.source.as_str();
@@ -184,7 +152,7 @@ async fn process_one(
         "spotify" => {
             // L1: deemix — uses pre-enqueued UUID from burst phase
             note(&pool, id, "deemix", "polling deemix").await;
-            if try_deemix(&pool, &deemix, &dir, &sub, timeout_secs, pre_enqueued_uuid)
+            if try_deemix(&pool, &deemix, &dir, &sub, timeout_secs)
                 .await
                 .is_ok()
             {
@@ -300,7 +268,6 @@ async fn try_deemix(
     dir: &Path,
     sub: &crate::models::Submission,
     timeout_secs: u64,
-    _pre_enqueued_uuid: Option<String>,
 ) -> anyhow::Result<()> {
     if sub.filename.is_none() {
         let _ = db::update_submission_status(pool, sub.id, "stage2_deemix", None, None, None).await;
