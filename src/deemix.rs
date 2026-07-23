@@ -93,17 +93,17 @@ struct DeemixActionResult {
 /// Default interval (in seconds) between deemix queue polls.
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 2;
 
-
 // ── Client ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct DeemixClient {
     base_url: String,
     client: Client,
+    arl: String,
 }
 
 impl DeemixClient {
-    pub fn new(base_url: String) -> Self {
+    pub fn new(base_url: String, arl: String) -> Self {
         let client = reqwest::Client::builder()
             .cookie_store(true)
             .build()
@@ -111,6 +111,7 @@ impl DeemixClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
+            arl,
         }
     }
 
@@ -135,6 +136,7 @@ impl DeemixClient {
 
     /// Add a URL to the deemix download queue.
     /// Returns the UUID if a fresh item was created, None if already queued.
+    /// Auto-re-authenticates on NotLoggedIn errors.
     pub async fn add_to_queue(&self, url: &str) -> anyhow::Result<Option<String>> {
         let body = serde_json::json!({"url": url});
         let resp = self
@@ -165,6 +167,39 @@ impl DeemixClient {
                 }
                 tracing::info!("Added to deemix queue (already queued): {}", url);
                 return Ok(None);
+            }
+            // Check for NotLoggedIn — re-auth and retry once
+            if full.errid.as_deref() == Some("NotLoggedIn") {
+                tracing::warn!("Deemix session expired, re-authenticating...");
+                self.login_arl(&self.arl).await?;
+                // Retry once inline
+                let retry_resp = self
+                    .client
+                    .post(format!("{}/api/addToQueue", self.base_url))
+                    .json(&serde_json::json!({"url": url}))
+                    .send()
+                    .await
+                    .context("Failed to retry addToQueue after re-auth")?;
+                let retry_text = retry_resp
+                    .text()
+                    .await
+                    .context("Failed to read retry addToQueue")?;
+                if let Ok(full2) = serde_json::from_str::<DeemixAddToQueueResponse>(&retry_text) {
+                    if full2.result {
+                        if let Some(uuid) = full2
+                            .data
+                            .as_ref()
+                            .and_then(|d| d.obj.first())
+                            .map(|o| o.uuid.clone())
+                        {
+                            if !uuid.is_empty() {
+                                return Ok(Some(uuid));
+                            }
+                        }
+                        return Ok(None);
+                    }
+                }
+                anyhow::bail!("Deemix addToQueue failed after re-auth");
             }
             anyhow::bail!(
                 "Deemix addToQueue failed: {}",

@@ -126,7 +126,8 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
     let app = wish::api::build_router(state);
 
     // Start the download worker in the background
-    let deemix_client = wish::deemix::DeemixClient::new(config.deemix.base_url.clone());
+    let deemix_client =
+        wish::deemix::DeemixClient::new(config.deemix.base_url.clone(), config.deemix.arl.clone());
 
     // Authenticate with deemix if ARL is configured
     if !config.deemix.arl.is_empty() {
