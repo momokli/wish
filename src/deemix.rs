@@ -28,7 +28,6 @@ pub struct DeemixUser {
 }
 
 /// A single queue item in the deemix queue.
-/// UUID is the key in the queue map — we populate it separately.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeemixQueueItem {
     #[serde(default)]
@@ -61,7 +60,6 @@ pub struct DeemixFile {
     pub path: String,
 }
 
-/// The data.obj[0] field from the addToQueue response.
 #[derive(Debug, Clone, Deserialize)]
 struct DeemixQueueObject {
     #[serde(default)]
@@ -95,6 +93,9 @@ struct DeemixActionResult {
 /// Default interval (in seconds) between deemix queue polls.
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 2;
 
+/// Status values that mean deemix is actively working and shouldn't be interrupted.
+const ACTIVE_STATUSES: &[&str] = &["queued", "downloading", "processing", "converting"];
+
 // ── Client ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -104,13 +105,11 @@ pub struct DeemixClient {
 }
 
 impl DeemixClient {
-    /// Create a new DeemixClient with cookie-based session support.
     pub fn new(base_url: String) -> Self {
         let client = reqwest::Client::builder()
             .cookie_store(true)
             .build()
             .expect("Failed to build reqwest client for DeemixClient");
-
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
@@ -130,17 +129,14 @@ impl DeemixClient {
 
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-
         if !status.is_success() {
             anyhow::bail!("Deemix loginArl failed: {} {}", status, text);
         }
-
         serde_json::from_str(&text).context("Failed to parse loginArl response")
     }
 
     /// Add a URL to the deemix download queue.
-    /// Returns the UUID of the queued item (extracted from data.obj[0].uuid).
-    /// If the item was already queued, obj may be empty and we try to find it by searching the queue.
+    /// Returns the UUID if a fresh item was created, None if already queued.
     pub async fn add_to_queue(&self, url: &str) -> anyhow::Result<Option<String>> {
         let body = serde_json::json!({"url": url});
         let resp = self
@@ -156,7 +152,6 @@ impl DeemixClient {
             .await
             .context("Failed to read addToQueue body")?;
 
-        // First try the full addToQueue response (includes data.obj)
         if let Ok(full) = serde_json::from_str::<DeemixAddToQueueResponse>(&text) {
             if full.result {
                 if let Some(uuid) = full
@@ -170,11 +165,7 @@ impl DeemixClient {
                         return Ok(Some(uuid));
                     }
                 }
-                // obj was empty — item may already be queued. Try finding it in current queue.
-                tracing::info!(
-                    "Added to deemix queue (duplicate or already queued): {}",
-                    url
-                );
+                tracing::info!("Added to deemix queue (already queued): {}", url);
                 return Ok(None);
             }
             anyhow::bail!(
@@ -183,10 +174,8 @@ impl DeemixClient {
             );
         }
 
-        // Fallback: try simple action result
-        let result: DeemixActionResult = serde_json::from_str(&text)
-            .with_context(|| format!("Failed to parse addToQueue response: {}", text))?;
-
+        let result: DeemixActionResult =
+            serde_json::from_str(&text).with_context(|| format!("addToQueue parse: {text}"))?;
         if result.result {
             tracing::info!("Added to deemix queue: {}", url);
             Ok(None)
@@ -195,6 +184,117 @@ impl DeemixClient {
                 "Deemix addToQueue failed: {}",
                 result.errid.as_deref().unwrap_or("unknown error")
             );
+        }
+    }
+
+    /// Retry a download by UUID. Use this when a track is already in the queue
+    /// with a terminal status (completed/failed) — it re-downloads fresh.
+    pub async fn retry_download(&self, uuid: &str) -> anyhow::Result<()> {
+        let body = serde_json::json!({"uuid": uuid});
+        let resp = self
+            .client
+            .post(format!("{}/api/retryDownload", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("Failed to POST retryDownload for uuid={}", uuid))?;
+
+        let text = resp
+            .text()
+            .await
+            .context("Failed to read retryDownload body")?;
+        let result: DeemixActionResult =
+            serde_json::from_str(&text).with_context(|| format!("retryDownload parse: {text}"))?;
+
+        if result.result {
+            tracing::info!("Retried deemix download for uuid={}", uuid);
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "Deemix retryDownload failed: {}",
+                result.errid.as_deref().unwrap_or("unknown error")
+            );
+        }
+    }
+
+    /// Ensure a Spotify URL is queued for download, handling all states:
+    /// - Already active (queued/downloading/processing): return uuid to poll
+    /// - Already terminal (completed/failed): call retry_download, return uuid to poll
+    /// - Not in queue: call add_to_queue, return new uuid
+    ///
+    /// Returns (uuid, is_fresh) — is_fresh means a new download was triggered.
+    pub async fn ensure_queued(
+        &self,
+        url: &str,
+        title: Option<&str>,
+        artist: Option<&str>,
+    ) -> anyhow::Result<(String, bool)> {
+        let map = self.get_queue_map().await?;
+
+        // Find by title/artist match (deemix doesn't return the original URL)
+        let found = map.iter().find(|(_, item)| {
+            let title_match = title
+                .map(|t| item.title.to_lowercase().contains(&t.to_lowercase()))
+                .unwrap_or(false);
+            let artist_match = artist
+                .map(|a| item.artist.to_lowercase().contains(&a.to_lowercase()))
+                .unwrap_or(false);
+            title_match && artist_match
+        });
+
+        if let Some((uuid, item)) = found {
+            let status = item.status.to_lowercase();
+            if ACTIVE_STATUSES.contains(&status.as_str()) {
+                tracing::info!(
+                    "Deemix already downloading: uuid={} title={} status={}",
+                    uuid,
+                    item.title,
+                    item.status
+                );
+                return Ok((uuid.clone(), false));
+            }
+            // Terminal status — retry to re-download
+            tracing::info!(
+                "Deemix item terminal ({}), retrying: uuid={} title={}",
+                item.status,
+                uuid,
+                item.title
+            );
+            self.retry_download(uuid).await?;
+            return Ok((uuid.clone(), true));
+        }
+
+        // Not in queue — add fresh
+        let new_uuid = self.add_to_queue(url).await?;
+        match new_uuid {
+            Some(uuid) => {
+                tracing::info!("Fresh deemix download: uuid={}", uuid);
+                Ok((uuid, true))
+            }
+            None => {
+                // add_to_queue returned None (duplicate but not found by title match?)
+                // Fall back: search again after add
+                let map2 = self.get_queue_map().await?;
+                let found2 = map2.iter().find(|(_, item)| {
+                    let title_match = title
+                        .map(|t| item.title.to_lowercase().contains(&t.to_lowercase()))
+                        .unwrap_or(false);
+                    let artist_match = artist
+                        .map(|a| item.artist.to_lowercase().contains(&a.to_lowercase()))
+                        .unwrap_or(false);
+                    title_match && artist_match
+                });
+                match found2 {
+                    Some((uuid, item)) => {
+                        if ACTIVE_STATUSES.contains(&item.status.to_lowercase().as_str()) {
+                            return Ok((uuid.clone(), false));
+                        }
+                        self.retry_download(uuid).await?;
+                        Ok((uuid.clone(), true))
+                    }
+                    None => anyhow::bail!("deemix: queued but not found in queue by title match"),
+                }
+            }
         }
     }
 
@@ -220,18 +320,10 @@ impl DeemixClient {
                 }
             }
         }
-
         Ok(map)
     }
 
-    /// Get the queue as a flat list.
-    pub async fn get_queue(&self) -> anyhow::Result<Vec<DeemixQueueItem>> {
-        let map = self.get_queue_map().await?;
-        Ok(map.into_values().collect())
-    }
-
     /// Poll until the item identified by UUID reaches a terminal status.
-    /// Returns the final queue item.
     pub async fn poll_by_uuid(
         &self,
         uuid: &str,
@@ -249,11 +341,7 @@ impl DeemixClient {
 
             if let Some(item) = map.get(uuid) {
                 match item.status.as_str() {
-                    "queued"
-                    | "downloading"
-                    | "con
-verting"
-                    | "processing" => {
+                    "queued" | "downloading" | "converting" | "processing" => {
                         tracing::debug!(
                             "Deemix uuid={} status={} progress={}%",
                             uuid,
@@ -268,30 +356,9 @@ verting"
                     }
                 }
             } else {
-                // UUID not in queue yet — it might still be resolving
                 tracing::debug!("Deemix uuid={} not yet in queue, waiting...", uuid);
                 tokio::time::sleep(poll_interval).await;
             }
         }
     }
-}
-
-/// Clear stale queue items from previous runs.
-/// Called at startup to prevent old completed items from being matched.
-pub async fn clear_stale_queue() -> anyhow::Result<()> {
-    let queue_dir = std::path::Path::new("/opt/music-stack/deemix-wish-config/queue");
-    if queue_dir.exists() {
-        let mut entries = tokio::fs::read_dir(queue_dir).await?;
-        let mut count = 0usize;
-        while let Some(entry) = entries.next_entry().await? {
-            if entry.file_type().await?.is_file() {
-                tokio::fs::remove_file(entry.path()).await?;
-                count += 1;
-            }
-        }
-        if count > 0 {
-            tracing::info!("Cleared {} stale items from deemix queue", count);
-        }
-    }
-    Ok(())
 }

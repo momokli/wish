@@ -290,93 +290,44 @@ async fn process_one(
 
 // ── Layers ──
 
-/// Try deemix download. If `pre_enqueued_uuid` is set (from the burst phase),
-/// skips add_to_queue and goes straight to polling.
+/// Try deemix download using ensure_queued — handles all states:
+/// - Fresh: add_to_queue → poll
+/// - Already active: poll existing UUID
+/// - Terminal from previous run: retry_download → poll fresh
+/// The `_pre_enqueued_uuid` parameter is kept for API compat, now unused.
 async fn try_deemix(
     pool: &SqlitePool,
     deemix: &DeemixClient,
     dir: &Path,
     sub: &crate::models::Submission,
     timeout_secs: u64,
-    pre_enqueued_uuid: Option<String>,
+    _pre_enqueued_uuid: Option<String>,
 ) -> anyhow::Result<()> {
     if sub.filename.is_none() {
         let _ = db::update_submission_status(pool, sub.id, "stage2_deemix", None, None, None).await;
     }
 
-    let poll_uuid = if let Some(uuid) = pre_enqueued_uuid {
-        // Already enqueued in the burst phase — go straight to polling
-        tracing::info!("[{}] using pre-enqueued deemix uuid={}", sub.id, uuid);
-        uuid
-    } else {
-        // No pre-enqueued UUID — enqueue now (fallback for retries)
-        note(pool, sub.id, "deemix", "adding to deemix queue").await;
-        let uuid = deemix.add_to_queue(&sub.spotify_url).await?;
-        match uuid {
-            Some(ref u) => u.clone(),
-            None => {
-                note(
-                    pool,
-                    sub.id,
-                    "deemix",
-                    "no UUID from addToQueue, searching queue for match",
-                )
-                .await;
-                let map = deemix.get_queue_map().await?;
-                // Only match items that are still in progress (not already completed from a previous run)
-                let found = map.iter().find(|(_, item)| {
-                    if matches!(
-                        item.status.as_str(),
-                        "completed" | "finished" | "failed" | "error" | "cancelled"
-                    ) {
-                        return false; // skip already-terminal items from old runs
-                    }
-                    let title_match = sub
-                        .track_title
-                        .as_deref()
-                        .map(|t| item.title.to_lowercase().contains(&t.to_lowercase()))
-                        .unwrap_or(false);
-                    let artist_match = sub
-                        .track_artist
-                        .as_deref()
-                        .map(|a| item.artist.to_lowercase().contains(&a.to_lowercase()))
-                        .unwrap_or(false);
-                    title_match && artist_match
-                });
-                match found {
-                    Some((u, item)) => {
-                        tracing::info!(
-                            "Found in-progress deemix queue item: uuid={} title={} status={}",
-                            u,
-                            item.title,
-                            item.status
-                        );
-                        u.clone()
-                    }
-                    None => {
-                        // Track was a duplicate in deemix but already completed.
-                        // Don't try to match old files — fall through to spotDL.
-                        note(
-                            pool,
-                            sub.id,
-                            "deemix",
-                            "track already completed in deemix queue — falling back to spotDL",
-                        )
-                        .await;
-                        anyhow::bail!("deemix: duplicate track already completed, no new download");
-                    }
-                }
-            }
-        }
-    };
+    note(pool, sub.id, "deemix", "ensure_queued").await;
+    let (poll_uuid, is_fresh) = deemix
+        .ensure_queued(
+            &sub.spotify_url,
+            sub.track_title.as_deref(),
+            sub.track_artist.as_deref(),
+        )
+        .await?;
 
-    note(
-        pool,
+    let action = if is_fresh {
+        "fresh download triggered"
+    } else {
+        "already in progress"
+    };
+    note(pool, sub.id, "deemix", action).await;
+    tracing::info!(
+        "[{}] deemix ensure_queued: uuid={} ({})",
         sub.id,
-        "deemix",
-        &format!("polling uuid={} (timeout {timeout_secs}s)", poll_uuid),
-    )
-    .await;
+        poll_uuid,
+        action
+    );
 
     match deemix.poll_by_uuid(&poll_uuid, timeout_secs).await {
         Ok(Some(item))
