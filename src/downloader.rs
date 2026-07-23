@@ -373,7 +373,10 @@ async fn try_spotdl(
         let _ = db::update_submission_status(pool, sub.id, "stage3_spotdl", None, None, None).await;
     }
     let fmt = dir
-        .join("{title} - {artists}.{output-ext}")
+        .join(format!(
+            "wish-{}—{{title}} - {{artists}}.{{output-ext}}",
+            sub.id
+        ))
         .to_string_lossy()
         .to_string();
     for a in 1..=max_retries {
@@ -402,29 +405,25 @@ async fn try_spotdl(
             .await
             .map_err(|_| anyhow::anyhow!("spotDL timed out after {timeout_secs}s"))??;
         if o.status.success() {
-            // Parse the downloaded filename from spotDL stdout.
-            // spotDL 4.x prints: Downloaded "Artist - Title":  \n  https://...
+            // Find the file by the unique prefix we gave it (wish-{id}—)
+            let prefix = format!("wish-{}—", sub.id);
+            if let Some(f) = find_by_prefix(dir, &prefix).await {
+                tracing::info!("[{}] spotDL downloaded: {}", sub.id, f);
+                return done(pool, dir, sub.id, &f, "spotDL").await;
+            }
+            // Fallback: stdout parsing + scan
             let stdout = String::from_utf8_lossy(&o.stdout);
             if let Some(name) = stdout
                 .lines()
                 .find(|l| l.trim().starts_with("Downloaded"))
                 .and_then(|l| l.split('"').nth(1))
             {
-                // Build expected file from the quoted title + .mp3 extension
                 let expected = format!("{name}.mp3");
                 let full_path = dir.join(&expected);
                 if full_path.exists() {
-                    tracing::info!("[{}] spotDL downloaded: {}", sub.id, expected);
                     return done(pool, dir, sub.id, &expected, "spotDL").await;
                 }
-                // The quoted name might differ from the file — try glob match
-                tracing::debug!(
-                    "[{}] spotDL quoted '{}' not found as file, scanning",
-                    sub.id,
-                    name
-                );
             }
-            // Fallback: scan recent files (only those newer than command start)
             if let Some(f) = scan_recent(dir, 5).await {
                 return done(pool, dir, sub.id, &f, "spotDL").await;
             }
@@ -610,6 +609,18 @@ async fn fail(pool: &SqlitePool, id: i64, msg: &str) {
     let _ = db::update_submission_status(pool, id, "failed", None, None, Some(msg)).await;
     let _ = db::append_attempt(pool, id, "fail", false, None, None, None, Some(msg)).await;
     tracing::error!("[{id}] FAILED: {msg}");
+}
+
+/// Find a file in dir whose name starts with the given prefix.
+async fn find_by_prefix(dir: &Path, prefix: &str) -> Option<String> {
+    let mut entries = tokio::fs::read_dir(dir).await.ok()?;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(prefix) && name.ends_with(".mp3") {
+            return Some(name);
+        }
+    }
+    None
 }
 
 async fn scan_recent(dir: &Path, within_secs: u64) -> Option<String> {
