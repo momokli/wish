@@ -62,10 +62,20 @@ pub struct DeemixFile {
     pub path: String,
 }
 
+/// Result from add_to_queue — both UUID (for polling) and Deezer track ID.
+#[derive(Debug, Clone)]
+pub struct DeemixEnqueueResult {
+    pub uuid: String,
+    pub deezer_track_id: Option<i64>,
+}
+
+/// The data.obj[0] field from the addToQueue response.
 #[derive(Debug, Clone, Deserialize)]
 struct DeemixQueueObject {
     #[serde(default)]
     uuid: String,
+    #[serde(default)]
+    id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -139,9 +149,9 @@ impl DeemixClient {
     }
 
     /// Add a URL to the deemix download queue.
-    /// Returns the UUID if a fresh item was created, None if already queued.
+    /// Returns DeemixEnqueueResult (uuid + deezer_track_id) if fresh, None if already queued.
     /// Auto-re-authenticates on NotLoggedIn errors.
-    pub async fn add_to_queue(&self, url: &str) -> anyhow::Result<Option<String>> {
+    pub async fn add_to_queue(&self, url: &str) -> anyhow::Result<Option<DeemixEnqueueResult>> {
         let body = serde_json::json!({"url": url});
         let resp = self
             .client
@@ -166,7 +176,14 @@ impl DeemixClient {
                 {
                     if !uuid.is_empty() {
                         tracing::info!("Added to deemix queue: {} (uuid={})", url, uuid);
-                        return Ok(Some(uuid));
+                        return Ok(Some(DeemixEnqueueResult {
+                            uuid,
+                            deezer_track_id: full
+                                .data
+                                .as_ref()
+                                .and_then(|d| d.obj.first())
+                                .and_then(|o| o.id),
+                        }));
                     }
                 }
                 tracing::info!("Added to deemix queue (already queued): {}", url);
@@ -193,14 +210,13 @@ impl DeemixClient {
                     .context("Failed to read retry addToQueue")?;
                 if let Ok(full2) = serde_json::from_str::<DeemixAddToQueueResponse>(&retry_text) {
                     if full2.result {
-                        if let Some(uuid) = full2
-                            .data
-                            .as_ref()
-                            .and_then(|d| d.obj.first())
-                            .map(|o| o.uuid.clone())
-                        {
-                            if !uuid.is_empty() {
-                                return Ok(Some(uuid));
+                        let obj = full2.data.as_ref().and_then(|d| d.obj.first());
+                        if let Some(o) = obj {
+                            if !o.uuid.is_empty() {
+                                return Ok(Some(DeemixEnqueueResult {
+                                    uuid: o.uuid.clone(),
+                                    deezer_track_id: o.id,
+                                }));
                             }
                         }
                         return Ok(None);

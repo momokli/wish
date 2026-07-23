@@ -51,6 +51,7 @@ pub async fn search_tracks(query: &str, limit: u32) -> anyhow::Result<Vec<Search
                 source_url: url,
                 source: "youtube".to_string(),
                 duration_ms: duration,
+                isrc: None,
             })
         })
         .take(limit as usize)

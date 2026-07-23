@@ -274,12 +274,14 @@ async fn try_deemix(
     }
 
     note(pool, sub.id, "deemix", "add_to_queue").await;
-    let uuid = deemix.add_to_queue(&sub.spotify_url).await?;
-    let poll_uuid = match uuid {
-        Some(u) => {
-            tracing::info!("[{}] fresh deemix download: uuid={}", sub.id, u);
+    let enqueue = deemix.add_to_queue(&sub.spotify_url).await?;
+    let poll_uuid = match enqueue {
+        Some(ref e) => {
+            // Store tracking IDs immediately — even if polling fails later.
+            let _ = db::set_deemix_ids(pool, sub.id, &e.uuid, e.deezer_track_id).await;
+            tracing::info!("[{}] fresh deemix download: uuid={}", sub.id, e.uuid);
             note(pool, sub.id, "deemix", "fresh — polling").await;
-            u
+            e.uuid.clone()
         }
         None => {
             // Duplicate — already in queue from a previous run.

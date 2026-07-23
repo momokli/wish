@@ -22,6 +22,9 @@ pub struct Submission {
     pub bitrate: Option<String>,
     pub container: Option<String>,
     pub attempts_json: Option<String>,
+    pub isrc: Option<String>,
+    pub deemix_queue_id: Option<String>,
+    pub deezer_track_id: Option<i64>,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
     pub first_available_at: Option<i64>,
@@ -79,6 +82,9 @@ pub struct AdminRow {
     pub bitrate: Option<String>,
     pub container: Option<String>,
     pub attempts_json: Option<String>,
+    pub isrc: Option<String>,
+    pub deemix_queue_id: Option<String>,
+    pub deezer_track_id: Option<i64>,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
     pub first_available_at: Option<i64>,
@@ -99,6 +105,8 @@ pub struct SearchResult {
     pub source: String,
     #[serde(rename = "durationMs")]
     pub duration_ms: Option<u32>,
+    #[serde(default)]
+    pub isrc: Option<String>,
 }
 
 /// Stats response for GET /stats.

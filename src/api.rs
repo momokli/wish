@@ -83,7 +83,7 @@ async fn serve_admin() -> impl IntoResponse {
 
 async fn admin_data(State(state): State<Arc<AppState>>) -> Result<Json<Vec<AdminRow>>, AppError> {
     let rows = sqlx::query_as::<_, AdminRow>(
-        "SELECT id, track_title, track_artist, spotify_url, source, status, filename, file_size, error_message, bitrate, container, attempts_json, created_at, updated_at, first_available_at FROM submissions ORDER BY created_at DESC"
+        "SELECT id, track_title, track_artist, spotify_url, source, status, filename, file_size, error_message, bitrate, container, attempts_json, isrc, deemix_queue_id, deezer_track_id, created_at, updated_at, first_available_at FROM submissions ORDER BY created_at DESC"
     )
     .fetch_all(&state.pool)
     .await
@@ -353,29 +353,34 @@ async fn download(
     }
 
     // Resolve track metadata
-    let (title, artist, cover_url) = match source.as_str() {
+    let (title, artist, cover_url, isrc) = match source.as_str() {
         "spotify" => {
             if let Some(spotify) = &state.spotify {
                 match spotify.get_track(&url).await {
-                    Ok(Some(track)) => (Some(track.title), Some(track.artist), track.cover_url),
-                    _ => (None, None, None),
+                    Ok(Some(track)) => (
+                        Some(track.title),
+                        Some(track.artist),
+                        track.cover_url,
+                        track.isrc,
+                    ),
+                    _ => (None, None, None, None),
                 }
             } else {
-                (None, None, None)
+                (None, None, None, None)
             }
         }
         _ => {
             // For youtube/soundcloud, try to get metadata via yt-dlp
             if state.ytdlp_available {
                 match resolve_via_ytdlp(&url).await {
-                    Ok(meta) => meta,
+                    Ok(meta) => (meta.0, meta.1, meta.2, None),
                     Err(e) => {
                         tracing::warn!("yt-dlp metadata resolution failed for {}: {e}", url);
-                        (None, None, None)
+                        (None, None, None, None)
                     }
                 }
             } else {
-                (None, None, None)
+                (None, None, None, None)
             }
         }
     };
@@ -388,6 +393,7 @@ async fn download(
         artist.as_deref(),
         cover_url.as_deref(),
         &source,
+        isrc.as_deref(),
     )
     .await
     .map_err(|e| AppError::Internal(format!("Failed to create submission: {}", e)))?;

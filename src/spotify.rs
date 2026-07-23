@@ -52,6 +52,7 @@ impl SpotifyClient {
                     .unwrap_or_else(|| "Unknown Artist".to_string());
                 let cover_url = track.album.images.first().map(|img| img.url.clone());
                 let duration_ms = track.duration.num_milliseconds() as u32;
+                let isrc = track.external_ids.get("isrc").cloned();
                 Some(SearchResult {
                     title: track.name,
                     artist,
@@ -60,6 +61,7 @@ impl SpotifyClient {
                     source_url: spotify_url,
                     source: "spotify".to_string(),
                     duration_ms: Some(duration_ms),
+                    isrc,
                 })
             })
             .collect();
@@ -87,6 +89,7 @@ impl SpotifyClient {
         let cover_url = track.album.images.first().map(|img| img.url.clone());
         let spotify_url = track.id.as_ref().map(|id| id.uri()).unwrap_or_default();
         let duration_ms = track.duration.num_milliseconds() as u32;
+        let isrc = track.external_ids.get("isrc").cloned();
         Ok(Some(SearchResult {
             title: track.name,
             artist,
@@ -95,6 +98,7 @@ impl SpotifyClient {
             source_url: spotify_url,
             source: "spotify".to_string(),
             duration_ms: Some(duration_ms),
+            isrc,
         }))
     }
 }
