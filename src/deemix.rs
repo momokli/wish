@@ -93,8 +93,6 @@ struct DeemixActionResult {
 /// Default interval (in seconds) between deemix queue polls.
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 2;
 
-/// Status values that mean deemix is actively working and shouldn't be interrupted.
-const ACTIVE_STATUSES: &[&str] = &["queued", "downloading", "processing", "converting"];
 
 // ── Client ───────────────────────────────────────────────────────────
 
@@ -214,87 +212,6 @@ impl DeemixClient {
                 "Deemix retryDownload failed: {}",
                 result.errid.as_deref().unwrap_or("unknown error")
             );
-        }
-    }
-
-    /// Ensure a Spotify URL is queued for download, handling all states:
-    /// - Already active (queued/downloading/processing): return uuid to poll
-    /// - Already terminal (completed/failed): call retry_download, return uuid to poll
-    /// - Not in queue: call add_to_queue, return new uuid
-    ///
-    /// Returns (uuid, is_fresh) — is_fresh means a new download was triggered.
-    pub async fn ensure_queued(
-        &self,
-        url: &str,
-        title: Option<&str>,
-        artist: Option<&str>,
-    ) -> anyhow::Result<(String, bool)> {
-        let map = self.get_queue_map().await?;
-
-        // Find by title/artist match (deemix doesn't return the original URL)
-        let found = map.iter().find(|(_, item)| {
-            let title_match = title
-                .map(|t| item.title.to_lowercase().contains(&t.to_lowercase()))
-                .unwrap_or(false);
-            let artist_match = artist
-                .map(|a| item.artist.to_lowercase().contains(&a.to_lowercase()))
-                .unwrap_or(false);
-            title_match && artist_match
-        });
-
-        if let Some((uuid, item)) = found {
-            let status = item.status.to_lowercase();
-            if ACTIVE_STATUSES.contains(&status.as_str()) {
-                tracing::info!(
-                    "Deemix already downloading: uuid={} title={} status={}",
-                    uuid,
-                    item.title,
-                    item.status
-                );
-                return Ok((uuid.clone(), false));
-            }
-            // Terminal status — retry to re-download
-            tracing::info!(
-                "Deemix item terminal ({}), retrying: uuid={} title={}",
-                item.status,
-                uuid,
-                item.title
-            );
-            self.retry_download(uuid).await?;
-            return Ok((uuid.clone(), true));
-        }
-
-        // Not in queue — add fresh
-        let new_uuid = self.add_to_queue(url).await?;
-        match new_uuid {
-            Some(uuid) => {
-                tracing::info!("Fresh deemix download: uuid={}", uuid);
-                Ok((uuid, true))
-            }
-            None => {
-                // add_to_queue returned None (duplicate but not found by title match?)
-                // Fall back: search again after add
-                let map2 = self.get_queue_map().await?;
-                let found2 = map2.iter().find(|(_, item)| {
-                    let title_match = title
-                        .map(|t| item.title.to_lowercase().contains(&t.to_lowercase()))
-                        .unwrap_or(false);
-                    let artist_match = artist
-                        .map(|a| item.artist.to_lowercase().contains(&a.to_lowercase()))
-                        .unwrap_or(false);
-                    title_match && artist_match
-                });
-                match found2 {
-                    Some((uuid, item)) => {
-                        if ACTIVE_STATUSES.contains(&item.status.to_lowercase().as_str()) {
-                            return Ok((uuid.clone(), false));
-                        }
-                        self.retry_download(uuid).await?;
-                        Ok((uuid.clone(), true))
-                    }
-                    None => anyhow::bail!("deemix: queued but not found in queue by title match"),
-                }
-            }
         }
     }
 

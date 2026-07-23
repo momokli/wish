@@ -290,11 +290,10 @@ async fn process_one(
 
 // ── Layers ──
 
-/// Try deemix download using ensure_queued — handles all states:
-/// - Fresh: add_to_queue → poll
-/// - Already active: poll existing UUID
-/// - Terminal from previous run: retry_download → poll fresh
-/// The `_pre_enqueued_uuid` parameter is kept for API compat, now unused.
+/// Try deemix L1. Two paths:
+/// - `add_to_queue` returns UUID → fresh download → poll
+/// - `add_to_queue` returns None → duplicate (queue wasn't purged) → bail to spotDL
+/// No title/substring matching — if we don't get a UUID, we trust spotDL.
 async fn try_deemix(
     pool: &SqlitePool,
     deemix: &DeemixClient,
@@ -307,27 +306,27 @@ async fn try_deemix(
         let _ = db::update_submission_status(pool, sub.id, "stage2_deemix", None, None, None).await;
     }
 
-    note(pool, sub.id, "deemix", "ensure_queued").await;
-    let (poll_uuid, is_fresh) = deemix
-        .ensure_queued(
-            &sub.spotify_url,
-            sub.track_title.as_deref(),
-            sub.track_artist.as_deref(),
-        )
-        .await?;
-
-    let action = if is_fresh {
-        "fresh download triggered"
-    } else {
-        "already in progress"
+    note(pool, sub.id, "deemix", "add_to_queue").await;
+    let uuid = deemix.add_to_queue(&sub.spotify_url).await?;
+    let poll_uuid = match uuid {
+        Some(u) => {
+            tracing::info!("[{}] fresh deemix download: uuid={}", sub.id, u);
+            note(pool, sub.id, "deemix", "fresh — polling").await;
+            u
+        }
+        None => {
+            // Duplicate — already in queue from a previous run.
+            // Don't try to match; just fall through to spotDL.
+            note(
+                pool,
+                sub.id,
+                "deemix",
+                "duplicate in queue — falling back to spotDL",
+            )
+            .await;
+            anyhow::bail!("deemix: duplicate (already queued)");
+        }
     };
-    note(pool, sub.id, "deemix", action).await;
-    tracing::info!(
-        "[{}] deemix ensure_queued: uuid={} ({})",
-        sub.id,
-        poll_uuid,
-        action
-    );
 
     match deemix.poll_by_uuid(&poll_uuid, timeout_secs).await {
         Ok(Some(item))
