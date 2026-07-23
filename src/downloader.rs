@@ -374,8 +374,8 @@ async fn try_spotdl(
     }
     let fmt = dir
         .join(format!(
-            "wish-{}—{{title}} - {{artists}}.{{output-ext}}",
-            sub.id
+            "__w{id}__{{title}} - {{artists}}.{{output-ext}}",
+            id = sub.id
         ))
         .to_string_lossy()
         .to_string();
@@ -406,7 +406,7 @@ async fn try_spotdl(
             .map_err(|_| anyhow::anyhow!("spotDL timed out after {timeout_secs}s"))??;
         if o.status.success() {
             // Find the file by the unique prefix we gave it (wish-{id}—)
-            let prefix = format!("wish-{}—", sub.id);
+            let prefix = format!("__w{}__", sub.id);
             if let Some(f) = find_by_prefix(dir, &prefix).await {
                 tracing::info!("[{}] spotDL downloaded: {}", sub.id, f);
                 return done(pool, dir, sub.id, &f, "spotDL").await;
