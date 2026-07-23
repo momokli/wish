@@ -1,6 +1,6 @@
 # Wish — Agent Guidance
 
-> **Last Updated**: 2026-07-21 — v0.6.1 (LAN deploy finalization)
+> **Last Updated**: 2026-07-23 — v0.6.2 (deemix polling fix)
 
 ---
 
@@ -15,10 +15,32 @@ This section is **static** — it's the system prompt for any agent working on t
 **Wish** is a song request server. Guests search across Spotify, YouTube, and SoundCloud and submit track links. The server downloads tracks through a multi-stage pipeline (deemix, then spotDL, then yt-dlp fallback). Downloaded files are served over HTTPS for the companion tool **Deck Feeder** (`github.com/momokli/deck-feeder`).
 
 **Stack**: Rust (Axum/SQLx/SQLite), embedded SPA frontend (vanilla JS/HTML/CSS).
-**Deployment target**: Hetzner VPS (projectmellon.de), behind Caddy reverse proxy.
+**Deployment target**: Home LAN (192.168.178.200), behind Caddy reverse proxy.
 
-A working Python/FastAPI prototype already runs at `wish.zukkafabrik.de`. This
-repo is the Rust rewrite.
+---
+
+## ⚠ Critical Findings (do not lose track)
+
+### Deemix polling gap
+
+`add_to_queue` auto-re-auths on `NotLoggedIn`. `poll_by_uuid → get_queue_map` did NOT — when session expired, `/api/getQueue` returned `{"queue":{}}` (empty), UUID wasn't found, poll loop ran until timeout (120s) while deemix had already finished.
+
+- **Evidence**: Rollergirl "Dear Jessie" — UUID obtained, file appeared via deemix, but submission assigned to spotDL copy.
+- **Fix**: `get_queue_map` now detects empty queue, re-auths, retries once.
+
+### ISRC tracking
+
+- `submissions.isrc` populated from Spotify API at submission time.
+- Deemix downloads contain `TSRC` ID3v2 frame (extractable via ffprobe).
+- ISRC safety net in `done()` extracts ISRC from file, verifies against `submissions.isrc`, reassigns on mismatch.
+
+### Queue purge
+
+Deemix queue persists across restarts. Must `docker stop → rm queue/ → docker start`. Not `docker restart`.
+
+### Deemix permanent failures
+
+Two tracks always fail: "The Way I Are" (DZ 180606), "The Rhythm Of The Night" (DZ 472400362). Error: `Cannot read properties of undefined`. Always fall through to spotDL.
 
 ---
 

@@ -274,28 +274,46 @@ impl DeemixClient {
     }
 
     /// Get the full deemix queue, UUID-keyed.
+    ///
+    /// When deemix session expires, `/api/getQueue` returns `{"queue":{}}`
+    /// (empty) — not an error. Re-auths and retries once on empty response.
     pub async fn get_queue_map(&self) -> anyhow::Result<HashMap<String, DeemixQueueItem>> {
-        let resp = self
-            .client
-            .get(format!("{}/api/getQueue", self.base_url))
-            .send()
-            .await
-            .context("Failed to GET getQueue")?;
+        for attempt in 0..2 {
+            let resp = self
+                .client
+                .get(format!("{}/api/getQueue", self.base_url))
+                .send()
+                .await
+                .context("Failed to GET getQueue")?;
 
-        let text = resp.text().await.context("Failed to read getQueue body")?;
-        let v: serde_json::Value =
-            serde_json::from_str(&text).context("Failed to parse getQueue response")?;
+            let text = resp.text().await.context("Failed to read getQueue body")?;
+            let v: serde_json::Value =
+                serde_json::from_str(&text).context("Failed to parse getQueue response")?;
 
-        let mut map = HashMap::new();
-        if let Some(queue) = v.get("queue").and_then(|q| q.as_object()) {
-            for (uuid, item_json) in queue {
-                if let Ok(mut item) = serde_json::from_value::<DeemixQueueItem>(item_json.clone()) {
-                    item.uuid = uuid.clone();
-                    map.insert(uuid.clone(), item);
+            let mut map = HashMap::new();
+            if let Some(queue) = v.get("queue").and_then(|q| q.as_object()) {
+                for (uuid, item_json) in queue {
+                    if let Ok(mut item) =
+                        serde_json::from_value::<DeemixQueueItem>(item_json.clone())
+                    {
+                        item.uuid = uuid.clone();
+                        map.insert(uuid.clone(), item);
+                    }
                 }
             }
+
+            if !map.is_empty() {
+                return Ok(map);
+            }
+
+            if attempt == 0 {
+                let _guard = self.auth_lock.lock().await;
+                tracing::warn!("Deemix getQueue empty — re-authenticating");
+                self.login_arl(&self.arl).await?;
+            }
         }
-        Ok(map)
+        tracing::debug!("Deemix queue genuinely empty");
+        Ok(HashMap::new())
     }
 
     /// Poll until the item identified by UUID reaches a terminal status.
