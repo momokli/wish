@@ -167,17 +167,18 @@ async fn process_one(
         "spotify" => {
             // L1: deemix
             note(&pool, id, "deemix", "polling deemix").await;
-            if try_deemix(&pool, &deemix, &deemix_dir, &best_dir, &sub, timeout_secs)
-                .await
-                .is_ok()
-            {
-                return;
+            match try_deemix(&pool, &deemix, &deemix_dir, &best_dir, &sub, timeout_secs).await {
+                Ok(()) => return,
+                Err(e) => {
+                    let reason = format!("{e:#}");
+                    tracing::warn!("[{id}] L1 deemix failed: {reason}");
+                    note(&pool, id, "deemix", &format!("failed: {reason}")).await;
+                }
             }
-            note(&pool, id, "deemix", "deemix failed, falling back to spotDL").await;
 
             // L2: spotDL
             note(&pool, id, "spotDL", "starting spotDL").await;
-            if try_spotdl(
+            match try_spotdl(
                 &pool,
                 &spotdl_dir,
                 &best_dir,
@@ -186,17 +187,14 @@ async fn process_one(
                 timeout_secs,
             )
             .await
-            .is_ok()
             {
-                return;
+                Ok(()) => return,
+                Err(e) => {
+                    let reason = format!("{e:#}");
+                    tracing::warn!("[{id}] L2 spotDL failed: {reason}");
+                    note(&pool, id, "spotDL", &format!("failed: {reason}")).await;
+                }
             }
-            note(
-                &pool,
-                id,
-                "spotDL",
-                "spotDL exhausted, falling back to yt-dlp",
-            )
-            .await;
 
             // L3: yt-dlp
             if ytdlp {
@@ -207,7 +205,7 @@ async fn process_one(
                     let tmpl = spotdl_dir
                         .join("%(artist,uploader|Unknown Artist)s - %(title)s [%(id)s].%(ext)s");
                     note(&pool, id, "yt-dlp", &format!("searching: {q}")).await;
-                    if run_ytdlp(
+                    match run_ytdlp(
                         &pool,
                         &spotdl_dir,
                         &best_dir,
@@ -220,11 +218,14 @@ async fn process_one(
                         timeout_secs,
                     )
                     .await
-                    .is_ok()
                     {
-                        return;
+                        Ok(()) => return,
+                        Err(e) => {
+                            let reason = format!("{e:#}");
+                            tracing::warn!("[{id}] L3 yt-dlp failed: {reason}");
+                            note(&pool, id, "yt-dlp", &format!("failed: {reason}")).await;
+                        }
                     }
-                    note(&pool, id, "yt-dlp", "yt-dlp exhausted").await;
                 }
             }
 
@@ -285,10 +286,8 @@ async fn process_one(
 
 // ── Layers ──
 
-/// Try deemix L1. Two paths:
-/// - `add_to_queue` returns UUID → fresh download → poll
-/// - `add_to_queue` returns None → duplicate (queue wasn't purged) → bail to spotDL
-/// No title/substring matching — if we don't get a UUID, we trust spotDL.
+/// Try deemix L1. Fire-and-forget add_to_queue, then scan the filesystem
+/// for a new .mp3 whose ISRC matches the submission. No UUID polling needed.
 async fn try_deemix(
     pool: &SqlitePool,
     deemix: &DeemixClient,
@@ -302,78 +301,120 @@ async fn try_deemix(
     }
 
     note(pool, sub.id, "deemix", "add_to_queue").await;
-    let enqueue = deemix.add_to_queue(&sub.spotify_url).await?;
-    let poll_uuid = match enqueue {
-        Some(ref e) => {
-            // Store tracking IDs immediately — even if polling fails later.
-            let _ = db::set_deemix_ids(pool, sub.id, &e.uuid, e.deezer_track_id).await;
-            tracing::info!("[{}] fresh deemix download: uuid={}", sub.id, e.uuid);
-            note(pool, sub.id, "deemix", "fresh — polling").await;
-            e.uuid.clone()
-        }
-        None => {
-            // No UUID from add_to_queue — either already queued (duplicate)
-            // or deemix couldn't resolve the track (not on Deezer).
-            // Fall through to spotDL in either case.
-            note(pool, sub.id, "deemix", "no UUID — falling back to spotDL").await;
-            anyhow::bail!("deemix: no UUID (track not on Deezer or already queued)");
-        }
-    };
 
-    match deemix.poll_by_uuid(&poll_uuid, timeout_secs).await {
-        Ok(Some(item))
-            if item.status == "finished"
-                || item.status == "downloaded"
-                || item.status == "completed" =>
-        {
-            if let Some(f) = item.files.first() {
-                let filename = &f.filename;
-                let full_path = dir.join(filename);
-                if full_path.exists() {
-                    tracing::info!("Deemix file found on disk: {} (from response)", filename);
-                    return done(pool, dir, best_dir, sub.id, filename, "deemix").await;
-                }
-                // Migration: check parent dir (old flat layout) and move into deemix/
-                if let Some(parent) = dir.parent() {
-                    let old_path = parent.join(filename);
-                    if old_path.exists() {
+    // Fire & forget — we don't care about UUID, we scan filesystem instead
+    let enqueue = deemix.add_to_queue(&sub.spotify_url).await;
+    match &enqueue {
+        Ok(Some(e)) => tracing::info!(
+            "[{}] deemix enqueued (uuid={}, deezer_id={:?})",
+            sub.id,
+            e.uuid,
+            e.deezer_track_id
+        ),
+        Ok(None) => tracing::info!(
+            "[{}] deemix enqueued (no UUID — scanning filesystem)",
+            sub.id
+        ),
+        Err(e) => tracing::warn!("[{}] deemix add_to_queue error: {e:#}", sub.id),
+    }
+
+    // Get expected ISRC for matching
+    let sub_isrc: Option<String> = sqlx::query_scalar("SELECT isrc FROM submissions WHERE id = ?")
+        .bind(sub.id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+    // Poll filesystem for matching file
+    tracing::info!(
+        "[{}] deemix scanning for file (isrc={:?}, timeout={}s)",
+        sub.id,
+        sub_isrc,
+        timeout_secs
+    );
+    note(
+        pool,
+        sub.id,
+        "deemix",
+        &format!("scanning filesystem (isrc={:?})", sub_isrc),
+    )
+    .await;
+    let start = std::time::Instant::now();
+    let poll = std::time::Duration::from_secs(2);
+    let mut found_matching = false;
+
+    while start.elapsed().as_secs() < timeout_secs {
+        if let Some(f) = scan_recent(dir, 10).await {
+            let full = dir.join(&f);
+            // If we have an ISRC, verify it matches
+            if let Some(ref expected) = sub_isrc {
+                if let Ok(Some(file_isrc)) = extract_metadata_isrc(&full).await {
+                    if file_isrc.eq_ignore_ascii_case(expected) {
                         tracing::info!(
-                            "Deemix file found in parent dir, moving to deemix/: {}",
-                            filename
+                            "[{}] deemix file matched by ISRC: {} ({})",
+                            sub.id,
+                            f,
+                            file_isrc
                         );
-                        let _ = tokio::fs::rename(&old_path, &full_path).await;
-                        return done(pool, dir, best_dir, sub.id, filename, "deemix").await;
+                        found_matching = true;
+                    } else {
+                        tracing::debug!(
+                            "[{}] deemix file ISRC mismatch: {} (file={}, expected={})",
+                            sub.id,
+                            f,
+                            file_isrc,
+                            expected
+                        );
+                        tokio::time::sleep(poll).await;
+                        continue;
                     }
                 }
-                tracing::warn!(
-                    "Deemix reported file {} but not found at {} — trying scan",
-                    filename,
-                    full_path.display()
-                );
             }
-            if let Some(f) = scan_recent(dir, 30).await {
+            // No ISRC to compare — trust the file (but still verify via done())
+            if found_matching || sub_isrc.is_none() {
                 return done(pool, dir, best_dir, sub.id, &f, "deemix").await;
             }
-            // Migration: scan parent dir too
-            if let Some(parent) = dir.parent() {
-                if let Some(f) = scan_recent(parent, 30).await {
-                    tracing::info!(
-                        "Deemix file found in parent dir via scan, moving to deemix/: {}",
-                        f
-                    );
-                    let _ = tokio::fs::rename(parent.join(&f), dir.join(&f)).await;
-                    return done(pool, dir, best_dir, sub.id, &f, "deemix").await;
-                }
-            }
-            anyhow::bail!("deemix finished but file not found on disk");
         }
-        Ok(Some(item)) => {
-            let msg = format!("deemix ended with status: {}", item.status);
-            anyhow::bail!(msg);
-        }
-        Ok(None) => anyhow::bail!("deemix: track vanished from queue before completion"),
-        Err(e) => anyhow::bail!("deemix poll error: {e}"),
+        tokio::time::sleep(poll).await;
     }
+
+    let elapsed = start.elapsed().as_secs();
+    tracing::warn!(
+        "[{}] deemix gave up after {elapsed}s (no file with matching ISRC found)",
+        sub.id
+    );
+    note(
+        pool,
+        sub.id,
+        "deemix",
+        &format!("timeout after {elapsed}s — no matching file"),
+    )
+    .await;
+    anyhow::bail!("deemix: no matching file found within {elapsed}s");
+}
+
+/// Quick ISRC extraction — returns just the ISRC string.
+async fn extract_metadata_isrc(path: &Path) -> anyhow::Result<Option<String>> {
+    let output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-show_entries",
+            "format_tags=TSRC",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .await?;
+    if output.status.success() {
+        let tsrc = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !tsrc.is_empty() {
+            return Ok(Some(tsrc));
+        }
+    }
+    Ok(None)
 }
 
 async fn try_spotdl(
@@ -726,17 +767,20 @@ async fn done(
                         .await;
                     }
                 }
-                // Artist check skipped for yt-dlp — YouTube artist names rarely match Spotify
-                if stage != "yt-dlp" {
-                    if let (Some(fa), Some(sa)) = (&meta.artist, &sub_artist) {
-                        if !titles_match(fa, sa) {
-                            return reject_file(
-                                &full,
-                                id,
-                                &format!("artist mismatch: file='{fa}', expected='{sa}'"),
-                            )
-                            .await;
-                        }
+            }
+
+            // Artist verification — always run for non-yt-dlp sources.
+            // ISRC can match but point to a different artist (e.g. Gippeul vs Fortuna
+            // on Deezer for the same ISRC). Reject so spotDL can find the right one.
+            if stage != "yt-dlp" {
+                if let (Some(fa), Some(sa)) = (&meta.artist, &sub_artist) {
+                    if !titles_match(fa, sa) {
+                        return reject_file(
+                            &full,
+                            id,
+                            &format!("artist mismatch: file='{fa}', expected='{sa}'"),
+                        )
+                        .await;
                     }
                 }
             }
