@@ -36,6 +36,21 @@ pub struct DownloadConfig {
     pub download_timeout_secs: u64,
 }
 
+impl DownloadConfig {
+    /// Deemix downloads (320kbps, best quality).
+    pub fn deemix_dir(&self) -> PathBuf {
+        self.output_dir.join("deemix")
+    }
+    /// spotDL / yt-dlp fallback downloads.
+    pub fn spotdl_dir(&self) -> PathBuf {
+        self.output_dir.join("spotdl")
+    }
+    /// Symlinks to the best available file per track (what dufs/deck-feeder sees).
+    pub fn best_dir(&self) -> PathBuf {
+        self.output_dir.join("best")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -127,25 +142,28 @@ impl Config {
             config.download.download_timeout_secs = val.parse().unwrap_or(300);
         }
 
-        // Ensure output directory exists
-        if !config.download.output_dir.exists() {
-            std::fs::create_dir_all(&config.download.output_dir).with_context(|| {
-                format!(
-                    "Failed to create output directory: {}",
-                    config.download.output_dir.display()
-                )
-            })?;
+        // Ensure output directories exist
+        for dir in [
+            &config.download.output_dir,
+            &config.download.deemix_dir(),
+            &config.download.spotdl_dir(),
+            &config.download.best_dir(),
+        ] {
+            if !dir.exists() {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("Failed to create directory: {}", dir.display()))?;
+            }
         }
 
         tracing::info!(
-            "Config loaded: spotify={}, deemix={}, output={}",
+            "Config loaded: spotify={}, deemix={}, best={}",
             if config.spotify.client_id.is_empty() {
                 "unset"
             } else {
                 "set"
             },
             config.deemix.base_url,
-            config.download.output_dir.display()
+            config.download.best_dir().display()
         );
 
         Ok(config)

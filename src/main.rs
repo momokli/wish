@@ -126,7 +126,8 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
     let app = wish::api::build_router(state);
 
     // Start the download worker in the background
-    let deemix_client = wish::deemix::DeemixClient::new(config.deemix.base_url.clone());
+    let deemix_client =
+        wish::deemix::DeemixClient::new(config.deemix.base_url.clone(), config.deemix.arl.clone());
 
     // Authenticate with deemix if ARL is configured
     if !config.deemix.arl.is_empty() {
@@ -156,7 +157,9 @@ async fn run_server(port: u16) -> anyhow::Result<()> {
     let worker = wish::downloader::DownloadWorker::new(
         pool.clone(),
         deemix_client,
-        config.download.output_dir.clone(),
+        config.download.deemix_dir(),
+        config.download.spotdl_dir(),
+        config.download.best_dir(),
         download_notify.clone(),
         ytdlp_available,
         config.download.ytdlp_cookies.clone(),

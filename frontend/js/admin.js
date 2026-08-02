@@ -529,6 +529,121 @@ function relTime(ts) {
   return Math.floor(diff / 86400) + "d ago";
 }
 
+function exportCSV() {
+  // Apply same filter as render()
+  var filtered = data;
+  if (filter !== "all") {
+    if (filter === "pending")
+      filtered = data.filter(function (r) {
+        return r.status !== "ready" && r.status !== "failed";
+      });
+    else
+      filtered = data.filter(function (r) {
+        return r.status === filter;
+      });
+  }
+
+  // Apply same sort as render()
+  var col = sortCol,
+    dir = sortDir;
+  filtered.sort(function (a, b) {
+    var va = a[col] || "",
+      vb = b[col] || "";
+    if (typeof va === "number") return dir === "asc" ? va - vb : vb - va;
+    return dir === "asc"
+      ? String(va).localeCompare(String(vb))
+      : String(vb).localeCompare(String(va));
+  });
+
+  // Build CSV
+  var headers = [
+    "id",
+    "title",
+    "artist",
+    "source",
+    "status",
+    "container",
+    "bitrate",
+    "size",
+    "filename",
+    "via",
+    "first_available",
+    "attempts",
+  ];
+  var lines = [headers.join(",")];
+
+  for (var i = 0; i < filtered.length; i++) {
+    var r = filtered[i];
+
+    // via: extract after "downloaded via "
+    var via = "";
+    if (r.error_message) {
+      var em = r.error_message;
+      if (em.indexOf("downloaded via ") === 0) via = em.substring(14);
+      else via = em;
+    }
+
+    // attempts: count from attempts_json
+    var attempts = 0;
+    try {
+      if (r.attempts_json) {
+        var logs = JSON.parse(r.attempts_json);
+        attempts = logs.length;
+      }
+    } catch (e) {}
+
+    // first_available: unix timestamp → ISO string
+    var fa = "";
+    if (r.first_available_at) {
+      fa = new Date(r.first_available_at * 1000).toISOString();
+    }
+
+    var row = [
+      r.id,
+      r.track_title || "",
+      r.track_artist || "",
+      r.source || "",
+      r.status || "",
+      r.container || "",
+      r.bitrate || "",
+      fmtsize(r.file_size),
+      r.filename || "",
+      via,
+      fa,
+      attempts,
+    ];
+
+    // Escape each cell: run through esc() then wrap in quotes, doubling any internal quotes
+    var csvRow = row
+      .map(function (cell) {
+        var s = esc(String(cell));
+        return '"' + s.replace(/"/g, '""') + '"';
+      })
+      .join(",");
+    lines.push(csvRow);
+  }
+
+  var csv = lines.join("\n");
+  var blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  var url = window.URL.createObjectURL(blob);
+
+  // Generate date-stamped filename
+  var now = new Date();
+  var y = now.getFullYear();
+  var m = String(now.getMonth() + 1);
+  if (m.length < 2) m = "0" + m;
+  var d = String(now.getDate());
+  if (d.length < 2) d = "0" + d;
+
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "wish-admin-export-" + y + "-" + m + "-" + d + ".csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.URL.revokeObjectURL(url);
+}
+
 fetchData();
 setInterval(fetchData, 10000);
 fetchPlaylists();

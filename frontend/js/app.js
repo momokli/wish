@@ -14,7 +14,12 @@
     abortControllers: {},
     cache: null,
     CACHE_TTL: 5 * 60 * 1000,
+
+    nowPlayingId: null,
   };
+
+  var audio = document.getElementById("audio-player");
+  var FAIRY = "https://fairy.zukkafabrik.de";
 
   var DOM = {
     searchInput: document.getElementById("searchInput"),
@@ -197,7 +202,7 @@
           source +
           '" data-title="' +
           escAttr(track.title) +
-          '">WANT</button></div>"' +
+          '">WANT</button></div>' +
           '<div class="card-expanded-content"><div class="expanded-inner">' +
           '<img src="' +
           cover +
@@ -272,7 +277,7 @@
         source +
         '" data-title="' +
         escAttr(track.title) +
-        '">WANT</button></div>"' +
+        '">WANT</button></div>' +
         '<div class="card-expanded-content"><div class="expanded-inner">' +
         '<img src="' +
         cover +
@@ -411,6 +416,8 @@
       var source = t.source || "";
       var url = t.spotify_url || "";
       var error = t.error_message || "";
+      var filename = t.filename || "";
+      var cleanName = cleanFilename(filename);
 
       if (!title) title = cleanUrl(url, source);
       if (!artist && url.indexOf("soundcloud.com/") !== -1) artist = cleanArtist(url);
@@ -419,9 +426,11 @@
       if (artist) meta += escHtml(artist) + " · ";
       if (source) meta += "[" + escHtml(source) + "]";
 
-      // Only show error reason for failed tracks (admin sees full pipeline in /admin)
+      // Only show error reason for failed tracks
       var errReason = "";
       if (status === "failed") errReason = shortError(error, source);
+
+      var isPlaying = state.nowPlayingId === t.id;
 
       html +=
         '<div class="queue-item"><div class="queue-info">' +
@@ -434,6 +443,28 @@
           ? '<br><span class="fail-reason">' + escHtml(errReason) + "</span>"
           : "") +
         "</div></div>" +
+        (status === "ready"
+          ? '<button class="queue-play' +
+            (isPlaying ? " playing" : "") +
+            '" data-id="' +
+            t.id +
+            '" data-filename="' +
+            escAttr(cleanName) +
+            '" title="' +
+            (isPlaying ? "Pause" : "Play") +
+            '">' +
+            (isPlaying
+              ? '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'
+              : '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>') +
+            "</button>" +
+            '<a class="queue-play queue-dl" href="' +
+            API +
+            "/downloads/" +
+            encodeURIComponent(cleanName) +
+            '" download title="Download">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
+            "</a>"
+          : "") +
         '<div class="queue-status status-' +
         label +
         '">' +
@@ -594,7 +625,57 @@
     if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
     return Math.floor(diff / 86400) + "d ago";
   }
-  // Expose shared utilities for playlists.js
+
+  // ── Audio Player ──
+  function cleanFilename(name) {
+    var m = name.match(/^__w\d+__(.+)/);
+    return m ? m[1] : name;
+  }
+
+  function playTrack(id, filename) {
+    var clean = cleanFilename(filename);
+    if (state.nowPlayingId === id) {
+      if (audio.paused) {
+        audio.play().catch(function () {});
+      } else {
+        audio.pause();
+      }
+      return;
+    }
+    state.nowPlayingId = id;
+    audio.src = FAIRY + "/" + encodeURIComponent(clean);
+    audio.style.display = "block";
+    audio.play().catch(function (e) {
+      showToast("Playback failed: " + e.message, "error");
+      state.nowPlayingId = null;
+      audio.style.display = "none";
+      fetchQueueData();
+    });
+    fetchQueueData();
+  }
+
+  audio.addEventListener("ended", function () {
+    state.nowPlayingId = null;
+    audio.style.display = "none";
+    fetchQueueData();
+  });
+
+  audio.addEventListener("pause", function () {
+    if (audio.currentTime >= audio.duration - 0.1) return; // ended, not paused
+    fetchQueueData();
+  });
+
+  // Delegate click on queue play buttons
+  document.getElementById("queue-list").addEventListener("click", function (e) {
+    var btn = e.target.closest(".queue-play:not(.queue-dl)");
+    if (!btn) return;
+    e.preventDefault();
+    var id = parseInt(btn.dataset.id, 10);
+    var filename = btn.dataset.filename;
+    playTrack(id, filename);
+  });
+
+  // ── Exports ──
   window._w = {
     escHtml: escHtml,
     escAttr: escAttr,

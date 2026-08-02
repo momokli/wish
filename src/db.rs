@@ -22,13 +22,29 @@ pub async fn insert_submission(
     track_artist: Option<&str>,
     cover_url: Option<&str>,
     source: &str,
+    isrc: Option<&str>,
 ) -> anyhow::Result<Submission> {
     sqlx::query_as::<_, Submission>(
-        "INSERT INTO submissions (spotify_url, track_title, track_artist, cover_url, source, status) VALUES (?, ?, ?, ?, ?, 'pending') RETURNING *"
+        "INSERT INTO submissions (spotify_url, track_title, track_artist, cover_url, source, isrc, status) VALUES (?, ?, ?, ?, ?, ?, 'pending') RETURNING *"
     )
-    .bind(spotify_url).bind(track_title).bind(track_artist).bind(cover_url).bind(source)
+    .bind(spotify_url).bind(track_title).bind(track_artist).bind(cover_url).bind(source).bind(isrc)
     .fetch_one(pool).await.context("Failed to insert submission")
 }
+/// Store deemix tracking IDs right after add_to_queue succeeds.
+pub async fn set_deemix_ids(
+    pool: &SqlitePool,
+    id: i64,
+    queue_id: &str,
+    deezer_track_id: Option<i64>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE submissions SET deemix_queue_id = ?, deezer_track_id = ?, updated_at = unixepoch() WHERE id = ?"
+    )
+    .bind(queue_id).bind(deezer_track_id).bind(id)
+    .execute(pool).await?;
+    Ok(())
+}
+
 
 pub async fn get_submissions(
     pool: &SqlitePool,
@@ -271,6 +287,7 @@ mod tests {
             Some("Test Artist"),
             Some("https://example.com/cover.jpg"),
             "spotify",
+            None,
         )
         .await
         .expect("Failed to insert");
@@ -293,6 +310,7 @@ mod tests {
             Some("A"),
             None,
             "spotify",
+            None,
         )
         .await
         .unwrap();
@@ -303,6 +321,7 @@ mod tests {
             Some("B"),
             None,
             "spotify",
+            None,
         )
         .await
         .unwrap();
@@ -313,6 +332,7 @@ mod tests {
             Some("C"),
             None,
             "spotify",
+            None,
         )
         .await
         .unwrap();
@@ -339,6 +359,7 @@ mod tests {
             Some("X"),
             None,
             "spotify",
+            None,
         )
         .await
         .unwrap();
@@ -361,6 +382,7 @@ mod tests {
             Some("1"),
             None,
             "spotify",
+            None,
         )
         .await
         .unwrap();
@@ -371,6 +393,7 @@ mod tests {
             Some("2"),
             None,
             "spotify",
+            None,
         )
         .await
         .unwrap();

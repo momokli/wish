@@ -17,3 +17,7 @@ deemix_image: registry.gitlab.com/bockiii/deemix-docker:latest
 
 # yt-dlp / spotdl venv
 venv_path: /srv/download-service/.venv
+
+# Systemd service tuning
+restart_sec: 5
+wish_path: "{{ cargo_home }}/bin:{{ venv_path }}/bin:/usr/local/bin:/usr/bin:/bin"

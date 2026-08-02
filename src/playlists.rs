@@ -230,6 +230,7 @@ pub async fn sync_one(
             artist.as_deref(),
             cover.as_deref(),
             &playlist.source,
+            None, // isrc not available for playlist syncs
         )
         .await
         {

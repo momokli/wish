@@ -1,0 +1,22 @@
+# ── Music host (LAN, 192.168.178.200) ──────────────────────────────
+
+wish_user: momo
+wish_home: /home/momo/wish
+cargo_home: /home/momo/.cargo
+wish_port: 8700
+restart_sec: 10
+
+# PATH — spotdl lives in .local/bin on the music host
+wish_path: "{{ cargo_home }}/bin:/home/momo/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Download output — dedicated wish directory (separate from archiving stack)
+download_dir: /opt/music-stack/wish-downloads
+
+# Dedicated deemix-wish instance (port 6598) — 128kbps, isolated from archiving
+deemix_port: 6598
+deemix_base_url: "http://localhost:6598"
+
+# Spotify credentials (from env or --extra-vars)
+spotify_client_id: "{{ lookup('env', 'WISH_SPOTIFY_CLIENT_ID') }}"
+spotify_client_secret: "{{ lookup('env', 'WISH_SPOTIFY_CLIENT_SECRET') }}"
+deemix_arl: "{{ lookup('env', 'WISH_DEEMIX_ARL') }}"

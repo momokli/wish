@@ -1,6 +1,6 @@
 # Wish — Agent Guidance
 
-> **Last Updated**: 2026-07-20 — v0.6.0 (ansible deploy + full pipeline verification)
+> **Last Updated**: 2026-07-23 — v0.7.1 (admin-view complete, next: subscribed-playlists or v0.8.0)
 
 ---
 
@@ -10,15 +10,107 @@ This section is **static** — it's the system prompt for any agent working on t
 
 ---
 
+## ⚠ Critical Findings (do not lose track)
+
+### Deemix polling gap
+
+`add_to_queue` auto-re-auths on `NotLoggedIn`. `poll_by_uuid → get_queue_map` did NOT — when session expired, `/api/getQueue` returned `{"queue":{}}` (empty), UUID wasn't found, poll loop ran until timeout (120s) while deemix had already finished.
+
+- **Evidence**: Rollergirl "Dear Jessie" — UUID obtained, file appeared via deemix, but submission assigned to spotDL copy.
+- **Fix**: `get_queue_map` now detects empty queue, re-auths, retries once.
+
+### ISRC tracking
+
+- `submissions.isrc` populated from Spotify API at submission time.
+- Deemix downloads contain `TSRC` ID3v2 frame (extractable via ffprobe).
+- ISRC safety net in `done()` extracts ISRC from file, verifies against `submissions.isrc`, reassigns on mismatch.
+
+### Queue purge
+
+Deemix queue persists across restarts. Must `docker stop → rm queue/ → docker start`. Not `docker restart`.
+
+### Deemix permanent failures
+
+Two tracks always fail: "The Way I Are" (DZ 180606), "The Rhythm Of The Night" (DZ 472400362). Error: `Cannot read properties of undefined`. Always fall through to spotDL.
+
+### Track variance (from 2-run analysis)
+
+Saved DBs: `wish_run1.db`, `wish_run2.db` on music host.
+
+- **2 permanent deemix failures**: The Way I Are, The Rhythm Of The Night
+- **3 always spotDL**: Dear Jessie, När vindarna viskar mitt namn, Feel It In Your Soul
+- **9 variance tracks**: Bette Davis Eyes, Ayla, Turquoise, Irreversible, Slumber Party, Call on Me, The Riddle, This Is The Pope, Tonight (We Are Young)
+
+Variance likely caused by file-visibility timing (deemix reports completed but file not yet on host filesystem via Docker volume).
+
+---
+
+## v0.8.0 Architecture Vision (for next thread)
+
+### File serving via Rust
+
+Replace dufs with Rust-based file serving from SQLite. Single endpoint:
+
+- `grant.wish.zukkafabrik.de/mp3` — file listing + download with API key auth
+
+### Separate download dirs, symlinked "best"
+
+- Deemix downloads: `/opt/music-stack/wish-downloads/deemix/`
+- spotDL downloads: `/opt/music-stack/wish-downloads/spotdl/`
+- Symlink: if both deemix and spotDL download same track (by ISRC), symlink from spotdl/ → deemix/ for the better version
+
+### Comment column
+
+Files table has a `comment` column. Initially placeholder, later data-driven:
+
+- Which playlists contain this track
+- Track metadata cross-references
+
+### Spotify OAuth user page
+
+- Users can auth via Spotify OAuth
+- Auto-ingest all their liked and created playlists
+- Receive an API key for programmatic access
+- The comment column prints playlist names each track belongs to
+
+### Solidify spotify_id → file_id tracking
+
+Current state: ISRC column populated, deemix_queue_id + deezer_track_id populated. ISRC is the cross-provider key.
+Need to verify: playlist sync also populates ISRC (currently only direct `/download` submissions do).
+
+---
+
 ## Project Context
 
 **Wish** is a song request server. Guests search across Spotify, YouTube, and SoundCloud and submit track links. The server downloads tracks through a multi-stage pipeline (deemix, then spotDL, then yt-dlp fallback). Downloaded files are served over HTTPS for the companion tool **Deck Feeder** (`github.com/momokli/deck-feeder`).
 
 **Stack**: Rust (Axum/SQLx/SQLite), embedded SPA frontend (vanilla JS/HTML/CSS).
-**Deployment target**: Hetzner VPS (projectmellon.de), behind Caddy reverse proxy.
+**Deployment target**: Home LAN (192.168.178.200), behind Caddy reverse proxy.
 
-A working Python/FastAPI prototype already runs at `wish.zukkafabrik.de`. This
-repo is the Rust rewrite.
+---
+
+## ⚠ Critical Findings (do not lose track)
+
+### Deemix polling gap
+
+`add_to_queue` auto-re-auths on `NotLoggedIn`. `poll_by_uuid → get_queue_map` did NOT — when session expired, `/api/getQueue` returned `{"queue":{}}` (empty), UUID wasn't found, poll loop ran until timeout (120s) while deemix had already finished.
+
+- **Evidence**: Rollergirl "Dear Jessie" — UUID obtained, file appeared via deemix, but submission assigned to spotDL copy.
+- **Fix**: `get_queue_map` now detects empty queue, re-auths, retries once.
+
+### ISRC tracking
+
+- `submissions.isrc` populated from Spotify API at submission time.
+- Deemix downloads contain `TSRC` ID3v2 frame (extractable via ffprobe).
+- ISRC safety net in `done()` extracts ISRC from file, verifies against `submissions.isrc`, reassigns on mismatch.
+
+### Queue purge
+
+Deemix queue persists across restarts. Must `docker stop → rm queue/ → docker start`. Not `docker restart`.
+
+### Deemix permanent failures
+
+Two tracks always fail: "The Way I Are" (DZ 180606), "The Rhythm Of The Night" (DZ 472400362). Error: `Cannot read properties of undefined`. Always fall through to spotDL.
 
 ---
 
@@ -752,63 +844,20 @@ frontend correctly displays download sources. TDD: test first, fix second.
 - [x] `curl https://wish.zukkafabrik.de/health` shows all services available
 - [x] No file copying — all services write to same directory
 
-## Plan: admin-view
-
-**Status**: in-progress
-**Branch**: `feat/rust-rewrite-v1`
-**Depends on**: full-pipeline-verification
-
-### Description
-
-Add an `/admin` page with a technical table of all submissions — IDs, URLs,
-status, bitrate, container, file size, download source, per-track attempt logs.
-Built in two phases: MVP → POC.
-
-### MVP: Basic admin table
-
-#### Backend
-
-1. **Migration `002_admin_fields.sql`** — add columns:
-   - `bitrate` TEXT (e.g. "320kbps", "lossless")
-   - `container` TEXT (e.g. "mp3", "flac", "m4a")
-   - `attempts_json` TEXT (JSON array of attempt logs)
-
-2. **`src/api.rs`** — `/admin` endpoint serves embedded admin HTML
-   - `/admin/data` — JSON endpoint returning all submissions with full details
-
-3. **`src/downloader.rs`** — after each download attempt, append to `attempts_json`
-   - On success: record `{"layer": "yt-dlp", "file": "...", "bitrate": "...", "container": "mp3"}`
-   - Detect container from file extension, attempt bitrate from yt-dlp output
-
-#### Frontend
-
-4. **`frontend/admin.html`** — standalone admin page (separate from guest SPA):
-   - Dark-themed table: ID, Title, Artist, Source, Status, Bitrate, Container, Size, Via
-   - Filter by status (ready/failed/pending)
-   - Sort by any column
-   - Auto-refresh every 10s
-   - Click row → expand to show attempt logs
-
-### POC: Full admin with attempt timeline
-
-5. Store per-attempt details: command output, timing, errors
-6. Admin: timeline view showing each download attempt as a row
-7. Export as CSV
-
-### Agent Decomposition
-
-| Agent | Files                                                           | Work                                                                                         |
-| ----- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| **A** | `migrations/002_admin_fields.sql`, `src/db.rs`, `src/models.rs` | DB migration, new columns, insert/update helpers                                             |
-| **B** | `src/downloader.rs`                                             | Record attempt details (bitrate, container, attempt_json) in try_spotdl/run_ytdlp/try_deemix |
-| **C** | `src/api.rs`                                                    | `/admin` + `/admin/data` endpoints, serve embedded admin.html                                |
-| **D** | `frontend/admin.html`                                           | Admin table UI with filtering, sorting, auto-refresh                                         |
-
-**Execution order**: A first (DB), then B+C+D in parallel.
-
 ---
 
 ## Completed Plans
+
+### admin-view — completed 2026-07-23
+
+Admin page with technical submission table. Migration `002_admin_fields.sql` added
+`bitrate`, `container`, `attempts_json` columns. `/admin` + `/admin/data` endpoints.
+Attempt-tracking pipeline with `append_attempt` recording each download stage.
+Bitrate detection via ffprobe in `done()`. Admin table UI with filtering, sorting,
+auto-refresh, expandable logs, playlists section, and CSV export.
+
+Files modified: `src/downloader.rs`, `src/api.rs`, `src/db.rs`, `src/models.rs`,
+`frontend/admin.html`, `frontend/js/admin.js`.
 
 ### full-pipeline-verification — completed 2026-07-20
 
@@ -998,6 +1047,73 @@ Full setup in `deploy/deemix/README.md` — key steps:
 1. Configure Spotify plugin via UI at `http://localhost:6595`
 2. Inject ARL: `curl -X POST http://localhost:6595/api/loginArl -H 'Content-Type: application/json' -d '{"arl":"..."}'`
 3. Verify: `curl http://localhost:6595/api/getQueue`
+
+### LAN (home network)
+
+Target: **192.168.178.200** (music host), behind Caddy reverse proxy on LAN host.
+
+| Component     | Location                                                            |
+| ------------- | ------------------------------------------------------------------- |
+| wish binary   | 192.168.178.200:8700 (systemd)                                      |
+| deemix-320    | 192.168.178.200:6596 (docker, `deemix-320` container)               |
+| dufs          | 192.168.178.200:5000 (docker, `dufs` container)                     |
+| Caddy         | LAN host (docker, `caddy-caddy-1`)                                  |
+| Domains       | wish.simonklimke.de, files.wish.simonklimke.de                      |
+| Spotify creds | systemd env override: `/etc/systemd/system/wish.service.d/env.conf` |
+
+#### Deploy
+
+```bash
+# Deploy wish + Caddy to LAN hosts (music + lan groups)
+WISH_SPOTIFY_CLIENT_ID=... WISH_SPOTIFY_CLIENT_SECRET=... \
+  ansible-playbook -i ansible/inventory.yml ansible/playbook.yml --limit music,lan
+
+# Partial deploys via tags:
+ansible-playbook ... --limit music --tags deps      # Rust + system deps only
+ansible-playbook ... --limit music --tags build     # git clone + cargo build
+ansible-playbook ... --limit music --tags config    # config files + env override
+ansible-playbook ... --limit music --tags systemd   # restart wish service
+ansible-playbook ... --limit lan   --tags caddy     # Caddy config only
+```
+
+#### Ansible tags
+
+| Tag       | What it covers                                            |
+| --------- | --------------------------------------------------------- |
+| `deps`    | Rust toolchain, spotDL, system packages                   |
+| `build`   | `git clone` + `cargo build --release`                     |
+| `config`  | `config.toml` template + env override (`wish.service.d/`) |
+| `systemd` | wish service install + daemon-reload + restart            |
+| `deploy`  | full deploy (git clone, build, config, start)             |
+| `caddy`   | Caddy site config + container restart                     |
+| `verify`  | health check after deploy                                 |
+
+#### Service file override (`/etc/systemd/system/wish.service.d/env.conf`)
+
+```ini
+[Service]
+Environment=WISH_SPOTIFY_CLIENT_ID=...
+Environment=WISH_SPOTIFY_CLIENT_SECRET=...
+Environment=WISH_DEEMIX_ARL=...
+```
+
+Managed by Ansible — re-run `--tags config` to update credentials.
+
+#### Logs
+
+```bash
+# wish service logs (on 192.168.178.200)
+ssh momo@192.168.178.200 journalctl -u wish.service --no-pager -n 50 -f
+
+# deemix-320 container logs (on 192.168.178.200)
+ssh momo@192.168.178.200 docker logs deemix-320 --tail 50
+```
+
+#### Quick DB reset (LAN)
+
+```bash
+ssh momo@192.168.178.200 "sqlite3 /home/momo/wish/wish.db 'DELETE FROM submissions;'"
+```
 
 ---
 

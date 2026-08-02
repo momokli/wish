@@ -216,7 +216,7 @@
       become_user: "{{ wish_user }}"
       environment:
         PATH: "{{ cargo_home }}/bin:{{ venv_path }}/bin:/usr/local/bin:/usr/bin:/bin"
-      tags: [wish, deploy]
+      tags: [wish, build, deploy]
 
     - name: Deploy wish config
       ansible.builtin.template:
@@ -359,3 +359,212 @@
         name: dufs
         state: restarted
         daemon_reload: yes
+
+# ═══════════════════════════════════════════════════════════════════════
+# LAN: Deploy wish to the music host (192.168.178.200)
+# ═══════════════════════════════════════════════════════════════════════
+
+- name: Deploy Wish backend on LAN music host
+  hosts: music
+
+  tasks:
+    - name: Install Rust (if missing)
+      ansible.builtin.shell: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      args:
+        creates: "{{ cargo_home }}/bin/rustc"
+      tags: [deps]
+
+    - name: Install spotDL
+      ansible.builtin.pip:
+        name: spotdl
+        executable: pip3
+      tags: [deps]
+
+    - name: Clone wish repo
+      ansible.builtin.git:
+        repo: https://github.com/momokli/wish.git
+        dest: "{{ wish_home }}"
+        version: feat/lan-deploy
+      tags: [deploy]
+
+    - name: Build wish release binary
+      ansible.builtin.shell: |
+        export PATH="{{ cargo_home }}/bin:$PATH"
+        cargo build --release
+      args:
+        chdir: "{{ wish_home }}"
+        creates: "{{ wish_home }}/target/release/wish"
+      tags: [build, deploy]
+
+    - name: Create config directory
+      ansible.builtin.file:
+        path: /home/{{ wish_user }}/.config/wish
+        state: directory
+        mode: "0700"
+      tags: [config]
+
+    - name: Deploy wish config
+      ansible.builtin.template:
+        src: wish-lan.config.toml.j2
+        dest: /home/{{ wish_user }}/.config/wish/config.toml
+        mode: "0600"
+      notify: restart wish
+      tags: [config]
+
+    - name: Install wish systemd service
+      ansible.builtin.template:
+        src: wish.service.j2
+        dest: /etc/systemd/system/wish.service
+        mode: "0644"
+      become: yes
+      notify: restart wish
+      tags: [systemd]
+
+    - name: Create wish env override directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/wish.service.d
+        state: directory
+        mode: "0755"
+      become: yes
+      tags: [config]
+
+    - name: Deploy wish env vars (Spotify + ARL)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/wish.service.d/env.conf
+        content: |
+          [Service]
+          Environment=WISH_SPOTIFY_CLIENT_ID={{ spotify_client_id }}
+          Environment=WISH_SPOTIFY_CLIENT_SECRET={{ spotify_client_secret }}
+          {% if deemix_arl is defined and deemix_arl | length > 0 %}
+          Environment=WISH_DEEMIX_ARL={{ deemix_arl }}
+          {% endif %}
+      become: yes
+      notify: restart wish
+      tags: [config]
+
+    - name: Enable and start wish
+      ansible.builtin.systemd:
+        name: wish
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      become: yes
+      tags: [systemd]
+
+    - name: Wait for wish to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:{{ wish_port }}/health"
+        status_code: 200
+      register: health
+      retries: 10
+      delay: 2
+      until: health is success
+      tags: [verify]
+
+    - name: Create deemix-wish config directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /opt/music-stack/deemix-wish-config/spotify
+        - /opt/music-stack/wish-downloads
+      tags: [deemix]
+
+    - name: Clone deemix-128 config for deemix-wish
+      ansible.builtin.shell: |
+        if [ -f /opt/music-stack/deemix-128-config/config.json ]; then
+          cp -n /opt/music-stack/deemix-128-config/config.json /opt/music-stack/deemix-wish-config/config.json
+          cp -n /opt/music-stack/deemix-128-config/spotify/config.json /opt/music-stack/deemix-wish-config/spotify/config.json
+        fi
+      changed_when: false
+      tags: [deemix]
+
+    - name: Start deemix-wish container
+      community.docker.docker_container:
+        name: deemix-wish
+        image: registry.gitlab.com/bockiii/deemix-docker:latest
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "6598:6595"
+        volumes:
+          - /opt/music-stack/deemix-wish-config:/config
+          - /opt/music-stack/wish-downloads:/downloads
+        env:
+          PUID: "1000"
+          PGID: "1000"
+          UMASK: "000"
+      tags: [deemix]
+
+    - name: Authenticate deemix-wish with ARL
+      ansible.builtin.uri:
+        url: "http://localhost:6598/api/loginArl"
+        method: POST
+        body_format: json
+        body:
+          status: 1
+          arl: "{{ deemix_arl }}"
+        status_code: 200
+      register: deemix_wish_auth
+      retries: 5
+      delay: 3
+      until: deemix_wish_auth is success
+      tags: [deemix]
+
+    - name: Restart dufs with wish-downloads volume
+      community.docker.docker_container:
+        name: dufs
+        image: sigoden/dufs
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "0.0.0.0:5000:5000"
+        volumes:
+          - /data/public/media/music:/data
+          - /opt/music-stack/wish-downloads:/data/wish
+        command: /data -A
+      tags: [dufs]
+
+  handlers:
+    - name: restart wish
+      ansible.builtin.systemd:
+        name: wish
+        state: restarted
+        daemon_reload: yes
+      become: yes
+
+# ═══════════════════════════════════════════════════════════════════════
+# LAN: Configure Caddy reverse proxy on the LAN host
+# ═══════════════════════════════════════════════════════════════════════
+
+- name: Configure Caddy reverse proxy on LAN host
+  hosts: lan
+
+  tasks:
+    - name: Deploy wish Caddy site config
+      ansible.builtin.template:
+        src: caddy-wish.conf.j2
+        dest: /home/momo/caddy/sites/wish.conf
+        mode: "0644"
+      notify: reload caddy
+      tags: [caddy]
+
+    - name: Ensure wish.simonklimke.de in home_domains.txt
+      ansible.builtin.lineinfile:
+        path: /home/momo/home_domains.txt
+        line: wish.simonklimke.de
+        create: yes
+        mode: "0644"
+      tags: [caddy]
+
+    - name: Restart Caddy Docker container
+      ansible.builtin.shell: docker restart caddy-caddy-1
+      changed_when: true
+      tags: [caddy]
+
+  handlers:
+    - name: reload caddy
+      ansible.builtin.shell: docker restart caddy-caddy-1
+      changed_when: true
