@@ -83,7 +83,7 @@ async fn serve_admin() -> impl IntoResponse {
 
 async fn admin_data(State(state): State<Arc<AppState>>) -> Result<Json<Vec<AdminRow>>, AppError> {
     let rows = sqlx::query_as::<_, AdminRow>(
-        "SELECT id, track_title, track_artist, spotify_url, source, status, filename, file_size, error_message, bitrate, container, attempts_json, isrc, deemix_queue_id, deezer_track_id, created_at, updated_at, first_available_at FROM submissions ORDER BY created_at DESC"
+        "SELECT id, track_title, track_artist, spotify_url, source, status, filename, file_size, error_message, bitrate, container, attempts_json, isrc, deemix_queue_id, deezer_track_id, duration_ms, created_at, updated_at, first_available_at FROM submissions ORDER BY created_at DESC"
     )
     .fetch_all(&state.pool)
     .await
