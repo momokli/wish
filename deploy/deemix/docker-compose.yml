@@ -17,13 +17,15 @@
 services:
   deemix:
     container_name: deemix
-    image: registry.gitlab.com/bockiii/deemix-docker:latest
+    # v4.6.0 (June 2025) includes the static track_id fix (GH #149/#276).
+    # Previous image: registry.gitlab.com/bockiii/deemix-docker:latest (stale binaries).
+    image: ghcr.io/bambanah/deemix:v4.6.0
     restart: unless-stopped
     ports:
-      - "127.0.0.1:6595:6595"    # only localhost — behind Caddy/VPN
+      - "127.0.0.1:6595:6595" # only localhost — behind Caddy/VPN
     volumes:
-      - /opt/download-service/downloads:/downloads   # shared download dir
-      - ./config:/config                              # deemix settings
+      - /opt/download-service/downloads:/downloads # shared download dir
+      - ./config:/config # deemix settings
     environment:
       - PUID=911
       - PGID=911

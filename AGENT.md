@@ -1,6 +1,6 @@
 # Wish — Agent Guidance
 
-> **Last Updated**: 2026-07-23 — v0.7.1 (admin-view complete, next: subscribed-playlists or v0.8.0)
+> **Last Updated**: 2026-08-02 — v0.7.2 (download verification, next: subscribed-playlists or v0.8.0)
 
 ---
 
@@ -32,6 +32,14 @@ Deemix queue persists across restarts. Must `docker stop → rm queue/ → docke
 ### Deemix permanent failures
 
 Two tracks always fail: "The Way I Are" (DZ 180606), "The Rhythm Of The Night" (DZ 472400362). Error: `Cannot read properties of undefined`. Always fall through to spotDL.
+
+### Deemix static track_id bug (GH #149, #276)
+
+Nov 2024: hardcoded test `track_id` committed to bambanah/deemix → ALL Spotify URLs resolve to "Alone" by Tobiashs. Fixed in source Dec 2024 but **never released as binary**. Our image `bockiii/deemix-docker:latest` uses static binaries — `:latest` tag may or may not include the fix. Recommended: switch to `ghcr.io/bambanah/deemix:v4.6.0`.
+
+### ISRC verification gap (v0.7.2 fix)
+
+`done()` only reassigns on cross-submission ISRC mismatch. When a wrong file is downloaded and no other submission has that ISRC, the file is silently accepted. v0.7.2 adds: extract metadata → verify ISRC → if mismatch & no reassign → REJECT & fall through to spotDL.
 
 ### Track variance (from 2-run analysis)
 
@@ -1201,3 +1209,90 @@ A first (foundation). Then B + C in parallel. Then D + E + F in parallel.
 - [ ] Frontend has a "Playlists" tab
 - [ ] Admin shows playlists with sync status
 - [ ] `cargo test` passes
+
+---
+
+## Plan: download-verification
+
+**Status**: in-progress
+**Branch**: `fix/download-verification`
+**Depends on**: rust-rewrite-v1, multi-source-search, full-pipeline-verification
+
+### Research: "Red Sun In The Sky" Wrong Song Match
+
+User reported that "Red Sun In The Sky" downloaded the wrong song.
+
+#### Root Cause Analysis
+
+**Cause 1 (PRIMARY): ISRC mapping collision for multi-version tracks**
+
+"Red Sun In The Sky" has 8+ versions on Spotify (Gippeul, greencard hüseyin, Fortuna,
+Mao Ze, E7ESV, 3000AD, Mao Ze Dong, Various Artists). All are covers/remixes of the
+original 1975 Tu Honggang song. Deemix resolves Spotify URL → ISRC → Deezer track.
+With `fallbackISRC: true, fallbackSearch: false`, ISRC matching can pick the wrong
+Deezer recording when multiple Deezer tracks share similar ISRCs.
+
+The deemix-remastered docs explicitly warn: _"ISRC matching is exact; the search
+fallback is best-effort and can mismatch on covers, live versions, or remixes."_
+
+**Cause 2 (KNOWN BUG): Deemix static track_id bug**
+
+- Nov 2024: Hardcoded test `track_id` was committed to bambanah/deemix, causing ALL
+  Spotify URLs to resolve to "Alone" by Tobiashs (`spotify:track:47JnKvBQFj4kFNs3sancVJ`)
+- Dec 8, 2024: PR #149 merged the fix (removed static track_id)
+- Jan 30, 2026: Issue #276 confirms CLI version STILL has the bug — fix never published
+  as a release binary
+- Our image: `registry.gitlab.com/bockiii/deemix-docker:latest` — whether affected
+  depends on which commit was built
+
+**ISRC Safety Net Gap**: Current `done()` in downloader.rs only handles cross-submission
+swaps. When a wrong file is downloaded and no other submission has that file's ISRC,
+the wrong file is silently accepted and marked `ready`.
+
+### Changes
+
+#### 1. File metadata extraction
+
+- `extract_metadata(path)` — extract title, artist, ISRC, album from file via ffprobe
+- Parse `format_tags=title,artist,album,TSRC` as JSON
+
+#### 2. Verification in `done()`
+
+After download, before marking `ready`:
+
+- Extract ISRC from file, compare to `submissions.isrc`
+- If ISRC mismatch AND no other submission to reassign → REJECT (return Err)
+- If no ISRC available, fall back to title/artist fuzzy match
+- Rejection propagates up → pipeline falls through to next layer (spotDL/yt-dlp)
+- The rejected file is quarantined (moved to a `_rejected/` subdirectory) for debugging
+
+#### 3. Title/artist fuzzy matching
+
+- Case-insensitive, trim whitespace
+- Strip common suffixes: `(Remastered)`, `- Remastered`, `[Live]`, etc.
+- If either title OR artist clearly mismatch → reject
+
+#### 4. Deemix image upgrade (recommendation)
+
+Recommend switching from `bockiii/deemix-docker:latest` (last CHANGELOG entry 2022)
+to `ghcr.io/bambanah/deemix:v4.6.0` (June 2025, includes static track_id fix) or
+`DRAZY/deemix-remastered` (actively maintained fork). Documented in plan, not
+implemented here — separate deploy concern.
+
+### Files modified
+
+| File                       | Change                                                                                                        |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `src/downloader.rs`        | Add `extract_metadata()`, `reject_file()`, strengthen `done()` ISRC safety net, add title/artist verification |
+| `tests/api_submissions.rs` | Add test for wrong-file rejection                                                                             |
+
+### Acceptance Criteria
+
+- [ ] `extract_metadata()` reliably extracts title, artist, ISRC from MP3/FLAC/M4A files
+- [ ] When ISRC mismatch detected and no other submission matches → file rejected, falls through to spotDL
+- [ ] When title/artist clearly mismatch → file rejected
+- [ ] When metadata matches → file accepted as before
+- [ ] Rejected files quarantined to `_rejected/` subdirectory (not deleted)
+- [ ] `cargo build` passes
+- [ ] `cargo test` passes
+- [ ] Existing download pipeline behavior unchanged for correct matches

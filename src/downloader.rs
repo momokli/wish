@@ -1,3 +1,4 @@
+use anyhow::Context;
 use sqlx::sqlite::SqlitePool;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -598,20 +599,141 @@ async fn done(
     name: &str,
     stage: &str,
 ) -> anyhow::Result<()> {
-    let sz = tokio::fs::metadata(dir.join(name))
+    let full = dir.join(name);
+    let sz = tokio::fs::metadata(&full)
         .await
         .ok()
         .map(|m| m.len() as i64);
     let container = name.split('.').last().map(|e| e.to_lowercase());
+    let bitrate = extract_bitrate(&full).await.ok().flatten();
+
+    // ── Verify file metadata against submission ──
+    let sub_title: Option<String> =
+        sqlx::query_scalar("SELECT track_title FROM submissions WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    let sub_artist: Option<String> =
+        sqlx::query_scalar("SELECT track_artist FROM submissions WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    let sub_isrc: Option<String> = sqlx::query_scalar("SELECT isrc FROM submissions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+    match extract_metadata(&full).await {
+        Ok(meta) => {
+            // ISRC verification (primary — exact match)
+            if let (Some(file_isrc), Some(exp_isrc)) = (&meta.isrc, &sub_isrc) {
+                if !file_isrc.eq_ignore_ascii_case(exp_isrc) {
+                    // Try cross-submission reassign
+                    if let Ok(Some(correct_id)) = sqlx::query_scalar::<_, i64>(
+                        "SELECT id FROM submissions WHERE isrc = ? AND id != ?",
+                    )
+                    .bind(file_isrc)
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await
+                    {
+                        tracing::warn!(
+                            "[{id}] ISRC mismatch: file={file_isrc} sub={exp_isrc} → reassigning to {correct_id}"
+                        );
+                        let c = name.split('.').last().map(|e| e.to_lowercase());
+                        let corr_bitrate = extract_bitrate(&full).await.ok().flatten();
+                        let corr_note = format!("downloaded via {stage} (ISRC-corrected)");
+                        let _ = db::update_submission_status(
+                            pool,
+                            correct_id,
+                            "ready",
+                            Some(name),
+                            sz,
+                            Some(&corr_note),
+                        )
+                        .await;
+                        let _ = sqlx::query("UPDATE submissions SET first_available_at = COALESCE(first_available_at, unixepoch()) WHERE id = ?").bind(correct_id).execute(pool).await;
+                        let _ = db::append_attempt(
+                            pool,
+                            correct_id,
+                            stage,
+                            true,
+                            Some(name),
+                            corr_bitrate.as_deref(),
+                            c.as_deref(),
+                            None,
+                        )
+                        .await;
+                        symlink_best(dir, best_dir, name, stage).await;
+                        let _ = db::update_submission_status(
+                            pool,
+                            id,
+                            "pending",
+                            None,
+                            None,
+                            Some("ISRC mismatch — reassigned"),
+                        )
+                        .await;
+                        anyhow::bail!(
+                            "ISRC mismatch — file reassigned to submission {correct_id}, this submission falling through"
+                        );
+                    }
+                    // No other submission has this ISRC → REJECT
+                    return reject_file(
+	                        &full,
+	                        id,
+	                        &format!(
+	                            "ISRC mismatch: file has '{file_isrc}', expected '{exp_isrc}' (no matching submission)"
+	                        ),
+	                    )
+	                    .await;
+                }
+            }
+
+            // Title/artist verification (fallback when ISRC unavailable)
+            if meta.isrc.is_none() {
+                if let (Some(ft), Some(st)) = (&meta.title, &sub_title) {
+                    if normalize_for_match(ft) != normalize_for_match(st) {
+                        return reject_file(
+                            &full,
+                            id,
+                            &format!("title mismatch: file='{ft}', expected='{st}'"),
+                        )
+                        .await;
+                    }
+                }
+                if let (Some(fa), Some(sa)) = (&meta.artist, &sub_artist) {
+                    if normalize_for_match(fa) != normalize_for_match(sa) {
+                        return reject_file(
+                            &full,
+                            id,
+                            &format!("artist mismatch: file='{fa}', expected='{sa}'"),
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("[{id}] metadata extraction failed: {e} — proceeding unverified");
+        }
+    }
+
+    // ── Verification passed — mark as ready ──
     let note = format!("downloaded via {stage}");
     db::update_submission_status(pool, id, "ready", Some(name), sz, Some(&note)).await?;
     let _ = sqlx::query(
-        "UPDATE submissions SET first_available_at = COALESCE(first_available_at, unixepoch()) WHERE id = ?",
-    )
-    .bind(id)
-    .execute(pool)
-    .await;
-    let bitrate = extract_bitrate(&dir.join(name)).await.ok().flatten();
+	        "UPDATE submissions SET first_available_at = COALESCE(first_available_at, unixepoch()) WHERE id = ?",
+	    )
+	    .bind(id)
+	    .execute(pool)
+	    .await;
     let _ = db::append_attempt(
         pool,
         id,
@@ -625,74 +747,7 @@ async fn done(
     .await;
     tracing::info!("[{id}] ready [{stage}] {name}");
 
-    // Symlink into best/ — deemix trumps spotdl/yt-dlp for same ISRC
     symlink_best(dir, best_dir, name, stage).await;
-
-    // ISRC safety net: if this file's ISRC belongs to a different submission, reassign
-    let full = dir.join(name);
-    if let Ok(Some(file_isrc)) = extract_isrc(&full).await {
-        let expected: Option<String> =
-            sqlx::query_scalar("SELECT isrc FROM submissions WHERE id = ?")
-                .bind(id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
-
-        if let Some(ref exp) = expected {
-            if !file_isrc.eq_ignore_ascii_case(exp) {
-                // Wrong file assigned — find the correct submission
-                if let Ok(Some(correct_id)) = sqlx::query_scalar::<_, i64>(
-                    "SELECT id FROM submissions WHERE isrc = ? AND id != ?",
-                )
-                .bind(&file_isrc)
-                .bind(id)
-                .fetch_optional(pool)
-                .await
-                {
-                    tracing::warn!(
-                        "[{id}] ISRC mismatch: file={file_isrc} sub={exp} → reassigning to {correct_id}"
-                    );
-                    let c = name.split('.').last().map(|e| e.to_lowercase());
-                    let corr_sz = tokio::fs::metadata(&full)
-                        .await
-                        .ok()
-                        .map(|m| m.len() as i64);
-                    let note = format!("downloaded via {stage} (ISRC-corrected)");
-                    let _ = db::update_submission_status(
-                        pool,
-                        correct_id,
-                        "ready",
-                        Some(name),
-                        corr_sz,
-                        Some(&note),
-                    )
-                    .await;
-                    let corr_bitrate = extract_bitrate(&full).await.ok().flatten();
-                    let _ = db::append_attempt(
-                        pool,
-                        correct_id,
-                        stage,
-                        true,
-                        Some(name),
-                        corr_bitrate.as_deref(),
-                        c.as_deref(),
-                        None,
-                    )
-                    .await;
-                    let _ = db::update_submission_status(
-                        pool,
-                        id,
-                        "pending",
-                        None,
-                        None,
-                        Some("ISRC mismatch — reassigned"),
-                    )
-                    .await;
-                }
-            }
-        }
-    }
 
     Ok(())
 }
@@ -767,30 +822,7 @@ async fn find_by_prefix(dir: &Path, prefix: &str) -> Option<String> {
     None
 }
 
-/// Extract ISRC from an audio file via ffprobe (TSRC ID3 frame).
-async fn extract_isrc(path: &Path) -> anyhow::Result<Option<String>> {
-    let output = tokio::process::Command::new("ffprobe")
-        .args([
-            "-v",
-            "quiet",
-            "-show_entries",
-            "format_tags=TSRC",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-        ])
-        .arg(path)
-        .output()
-        .await?;
-
-    if output.status.success() {
-        let tsrc = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !tsrc.is_empty() && tsrc.len() >= 8 {
-            return Ok(Some(tsrc));
-        }
-    }
-    Ok(None)
-}
-
+/// Metadata extracted from an audio file via ffprobe.
 /// Extract audio bitrate from a file via ffprobe.
 /// Returns e.g. "320kbps" or None if ffprobe fails or returns unusable data.
 async fn extract_bitrate(path: &Path) -> anyhow::Result<Option<String>> {
@@ -817,6 +849,98 @@ async fn extract_bitrate(path: &Path) -> anyhow::Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+/// Metadata extracted from an audio file via ffprobe.
+struct FileMetadata {
+    title: Option<String>,
+    artist: Option<String>,
+    isrc: Option<String>,
+}
+
+/// Extract title, artist, and ISRC from an audio file via ffprobe.
+async fn extract_metadata(path: &Path) -> anyhow::Result<FileMetadata> {
+    let output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-show_entries",
+            "format_tags=title,artist,TSRC",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!("ffprobe exited non-zero");
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("ffprobe JSON parse")?;
+    let tags = v.get("format").and_then(|f| f.get("tags"));
+
+    Ok(FileMetadata {
+        title: tags
+            .and_then(|t| t.get("title"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        artist: tags
+            .and_then(|t| t.get("artist"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        isrc: tags
+            .and_then(|t| t.get("TSRC"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
+/// Normalize a title/artist string for fuzzy comparison.
+fn normalize_for_match(s: &str) -> String {
+    let s = s.to_lowercase().trim().to_string();
+    for suffix in &[
+        "(remastered)",
+        "[remastered]",
+        "- remastered",
+        "(live)",
+        "[live]",
+        "- live",
+        "(remaster)",
+        "- remaster",
+        "(original mix)",
+        "(radio edit)",
+        "- radio edit",
+        "(single version)",
+        "[single version]",
+    ] {
+        if let Some(stripped) = s.strip_suffix(suffix) {
+            return stripped.trim().to_string();
+        }
+    }
+    s
+}
+
+/// Reject a wrongly-downloaded file: quarantine and return an error so the
+/// pipeline falls through to the next download layer.
+async fn reject_file(full: &Path, id: i64, reason: &str) -> anyhow::Result<()> {
+    if let Some(parent) = full.parent() {
+        let rejected_dir = parent.join("_rejected");
+        let _ = tokio::fs::create_dir_all(&rejected_dir).await;
+        if let Some(fname) = full.file_name() {
+            let dest = rejected_dir.join(fname);
+            if let Err(e) = tokio::fs::rename(full, &dest).await {
+                tracing::warn!("[{id}] failed to quarantine rejected file: {e} — deleting instead");
+                let _ = tokio::fs::remove_file(full).await;
+            } else {
+                tracing::info!("[{id}] quarantined: {}", dest.display());
+            }
+        }
+    }
+
+    tracing::warn!("[{id}] REJECTED: {reason}");
+    anyhow::bail!("download rejected: {reason}");
 }
 
 async fn scan_recent(dir: &Path, within_secs: u64) -> Option<String> {
