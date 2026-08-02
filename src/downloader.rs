@@ -527,7 +527,23 @@ async fn run_ytdlp(
                 let (artist_opt, title) = parse_stem_title(stem);
                 let _ = db::update_track_metadata(pool, id, &title, artist_opt.as_deref()).await;
 
-                return done(pool, dir, best_dir, id, &name, "yt-dlp").await;
+                match done(pool, dir, best_dir, id, &name, "yt-dlp").await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        // Verification rejected — retry if attempts remain
+                        let rsn = format!("{e:#}");
+                        note(pool, id, "yt-dlp", &format!("attempt {a} rejected: {rsn}")).await;
+                        if a < max_retries {
+                            let delay = std::time::Duration::from_secs(2u64.pow(a - 1));
+                            tracing::warn!("[{id}] yt-dlp {a} rejected ({delay:?}): {rsn}");
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        anyhow::bail!(
+                            "yt-dlp verification rejected after {max_retries} attempts: {rsn}"
+                        );
+                    }
+                }
             }
             anyhow::bail!("yt-dlp succeeded but no filepath printed to stdout");
         }
@@ -699,7 +715,7 @@ async fn done(
             // Title/artist verification (fallback when ISRC unavailable)
             if meta.isrc.is_none() {
                 if let (Some(ft), Some(st)) = (&meta.title, &sub_title) {
-                    if normalize_for_match(ft) != normalize_for_match(st) {
+                    if !titles_match(ft, st) {
                         return reject_file(
                             &full,
                             id,
@@ -709,7 +725,7 @@ async fn done(
                     }
                 }
                 if let (Some(fa), Some(sa)) = (&meta.artist, &sub_artist) {
-                    if normalize_for_match(fa) != normalize_for_match(sa) {
+                    if !titles_match(fa, sa) {
                         return reject_file(
                             &full,
                             id,
@@ -895,6 +911,20 @@ async fn extract_metadata(path: &Path) -> anyhow::Result<FileMetadata> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
     })
+}
+
+/// Check if file and expected titles/artists match. Uses normalized exact match
+/// first, then substring containment (handles YouTube prefixes like
+/// "mao zedong propaganda music Red Sun in the Sky").
+fn titles_match(file_str: &str, expected: &str) -> bool {
+    let f = normalize_for_match(file_str);
+    let e = normalize_for_match(expected);
+    if f == e {
+        return true;
+    }
+    // Substring match — expected title must be at least 5 chars to avoid
+    // false positives like "Red" matching "Red Sun In The Sky".
+    e.len() >= 5 && f.contains(&e)
 }
 
 /// Normalize a title/artist string for fuzzy comparison.

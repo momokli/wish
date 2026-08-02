@@ -1,0 +1,100 @@
+# Kagi API
+
+The Kagi API provides programmatic access to data that powers our search results & more.
+
+Get started on the [API Dashboard](https://kagi.com/api) to set up billing, manage API keys, and more.
+
+See our [API Pricing](https://kagi.com/api/pricing) page for standard rates.
+
+### Official Client Libraries
+
+We offer the following libraries you can use to interact with the Kagi API. These are generated from an OpenAPI spec.
+
+- [Golang](https://github.com/kagisearch/kagi-openapi-golang)
+- [Python](https://github.com/kagisearch/kagi-openapi-python)
+- [TypeScript](https://github.com/kagisearch/kagi-openapi-typescript)
+- [Rust](https://github.com/kagisearch/kagi-openapi-rust)
+
+If you have a language you would like to use and it's not in the list, send us a message and we will add it to the list if it is supported. Or you can use the [spec](https://kagi.redocly.app/_spec/openapi.yaml?download) to build your own custom library.
+
+In the future we will most likely offer more crafted API wrappers and spotlight clients and applications built by our community - feel free to send them to us!
+
+### MCP
+
+We offer a hosted MCP server at: https://mcp.kagi.com/mcp
+
+At this time, we do not support setup via OAuth2 flow, but this is on our roadmap. You will need to get your [API key from the dashboard](https://kagi.com/api/keys) and plug it into your local client with `Bearer` HTTP authentication.
+
+Here is an example to get started with Claude Code:
+
+```
+claude mcp add kagi https://mcp.kagi.com/mcp --transport http --header "Authorization: Bearer $(read -sp 'API key: ' k; echo $k)" --scope user
+```
+
+You can review and contribute to our [MCP server on GitHub](https://github.com/kagisearch/kagimcp/tree/rehan/v1-api)!
+
+### Support
+
+For bug reports, feature requests, or billing related issues please reach out to [developers@kagi.com](mailto:developers@kagi.com) and we will be happy to assist you.
+
+To help us answer your reports efficiently, please be prepared to provide as much info as you can:
+
+- For bugs, include request trace IDs from the `meta.trace` response field or the `X-Kagi-Trace` response header.
+- If issues are easily reproduced in our [playground](https://kagi.com/api/playground/search), send us a link to the playground - the URL will contain parameters to configure the request so that we can reproduce ourselves.
+- Include any code snippets or precise descriptions of the request you are making, and full samples of the response bodies from the API
+- Include mention of which wrapper you are using if any, or links to relevant application code we can review
+- Include the email address associated with your Kagi login if it is not the one you are emailing from
+
+Thank you!
+
+### Discord
+
+Join our [Discord](https://kagi.com/discord)! Good for quick questions or chatting about things you've made with our APIs!
+
+In the server you will find the `#api` forum for API related inquiries.
+
+Version: 1
+License: Apache-2.0
+
+## Servers
+
+Production api endpoint
+
+```
+https://kagi.com/api/v1
+```
+
+## Security
+
+### kagi
+
+Kagi API key from https://kagi.com/api/keys
+
+Type: http
+Scheme: bearer
+
+## Download OpenAPI description
+
+[Kagi API](https://redocly-api-docs.kagi.com/api/docs/_bundle/openapi.yaml)
+
+## Search API
+
+The Search API is a feature-rich endpoint for search products and agents. It gives programmable access to Kagi's premium search results pulled from many different sources - including our in-house indexes - and re-ranked to surface accurate answers and interesting finds. You can read about our approach towards search [on our blog](https://blog.kagi.com/the-many-benefits-of-paying-for-search).
+
+The API supports most of the features that we offer through our web UI, including [Lenses](https://help.kagi.com/kagi/features/lenses.html).
+
+You can also request full markdown extraction of the top results in a single API request.
+
+### Perform a web search
+
+- [POST /search](https://redocly-api-docs.kagi.com/api/docs/openapi/search/search.md)
+
+## Extract API
+
+Extract contents from web pages, currently in markdown form. This endpoint accepts a list of URLs
+and returns the extracted markdown content for each page.
+
+### Extract page content as markdown from URLs
+
+- [POST /extract](https://redocly-api-docs.kagi.com/api/docs/openapi/extract/extractcontent.md): Extracts markdown content from up to 10 HTTP(s) URLs. Each URL is processed
+  and the extracted content is returned in the response.
