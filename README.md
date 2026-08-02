@@ -6,8 +6,6 @@ Files are served for [Deck Feeder](https://github.com/momokli/deck-feeder).
 
 Built with Rust (Axum, SQLx, SQLite) and a vanilla JS frontend embedded in the binary.
 
-![](screenshots/search.png)
-
 ## Quick Start
 
 ```bash
@@ -16,6 +14,17 @@ cargo run -- serve
 ```
 
 Opens at `http://localhost:3000`.
+
+![](screenshots/search.png)
+
+Search across Spotify, YouTube, and SoundCloud in parallel.
+
+![](screenshots/searched.png)
+
+Submit tracks and track download status in the Requests tab. Ready tracks
+can be played or downloaded directly.
+
+![](screenshots/requests.png)
 
 ## Config
 
