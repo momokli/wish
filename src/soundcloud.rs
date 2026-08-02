@@ -42,7 +42,12 @@ pub async fn search_tracks(query: &str, limit: u32) -> anyhow::Result<Vec<Search
                 .or(v["channel"].as_str())
                 .unwrap_or("Unknown Artist")
                 .to_string();
-            let cover_url = v["thumbnail"].as_str().map(|s| s.to_string());
+            // With --flat-playlist, yt-dlp returns "thumbnails" (plural, array)
+            // instead of "thumbnail" (singular, string). Try both.
+            let cover_url = v["thumbnail"]
+                .as_str()
+                .map(|s| s.to_string())
+                .or_else(|| v["thumbnails"][0]["url"].as_str().map(|s| s.to_string()));
             let duration = v["duration"].as_f64().map(|d| (d * 1000.0) as u32);
             let url = v["webpage_url"]
                 .as_str()

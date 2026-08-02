@@ -414,4 +414,201 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, sub2.id);
     }
+
+    #[tokio::test]
+    async fn test_append_attempt_count() {
+        let pool = setup_test_db().await;
+        let sub = insert_submission(
+            &pool,
+            "spotify:track:countme",
+            Some("Count"),
+            Some("Me"),
+            None,
+            "spotify",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Append 5 attempts like the pipeline does
+        append_attempt(
+            &pool,
+            sub.id,
+            "start",
+            false,
+            None,
+            None,
+            None,
+            Some("spotify pipeline starting"),
+        )
+        .await
+        .unwrap();
+        append_attempt(
+            &pool,
+            sub.id,
+            "deemix",
+            false,
+            None,
+            None,
+            None,
+            Some("polling deemix"),
+        )
+        .await
+        .unwrap();
+        append_attempt(
+            &pool,
+            sub.id,
+            "deemix",
+            false,
+            None,
+            None,
+            None,
+            Some("add_to_queue"),
+        )
+        .await
+        .unwrap();
+        append_attempt(
+            &pool,
+            sub.id,
+            "deemix",
+            false,
+            None,
+            None,
+            None,
+            Some("scanning filesystem (isrc=None)"),
+        )
+        .await
+        .unwrap();
+        append_attempt(
+            &pool,
+            sub.id,
+            "deemix",
+            true,
+            Some("Artist - Title.mp3"),
+            Some("320k"),
+            Some("mp3"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Fetch and parse attempts_json
+        let fetched = get_submission_by_id(&pool, sub.id).await.unwrap().unwrap();
+        let raw = fetched
+            .attempts_json
+            .expect("attempts_json should not be null");
+        let arr: Vec<serde_json::Value> =
+            serde_json::from_str(&raw).expect("should be valid JSON array");
+
+        // Filter out null entries — nulls shouldn't be in the array
+        let valid: Vec<_> = arr.iter().filter(|v| !v.is_null()).collect();
+
+        eprintln!("Total entries in array: {}", arr.len());
+        eprintln!("Valid entries: {}", valid.len());
+        for (i, v) in arr.iter().enumerate() {
+            eprintln!("  [{i}] = {v}");
+        }
+
+        // The count must match the number of non-null entries
+        assert_eq!(
+            arr.len(),
+            valid.len(),
+            "array should not contain null entries"
+        );
+        // And must match the number of append_attempt calls
+        assert_eq!(arr.len(), 5, "should have exactly 5 entries");
+    }
+
+    #[tokio::test]
+    async fn test_append_attempt_with_special_chars() {
+        let pool = setup_test_db().await;
+        let sub = insert_submission(
+            &pool,
+            "spotify:track:special",
+            Some("Special"),
+            Some("Chars"),
+            None,
+            "spotify",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Test with error messages containing special characters
+        // that could interact with JSON/SQLite parsing
+        append_attempt(
+            &pool,
+            sub.id,
+            "start",
+            false,
+            None,
+            None,
+            None,
+            Some("pipeline starting"),
+        )
+        .await
+        .unwrap();
+        append_attempt(
+            &pool,
+            sub.id,
+            "spotDL",
+            false,
+            None,
+            None,
+            None,
+            Some("failed: spotDL failed after 2 attempts"),
+        )
+        .await
+        .unwrap();
+        append_attempt(
+            &pool,
+            sub.id,
+            "yt-dlp",
+            false,
+            None,
+            None,
+            None,
+            Some("attempt 1 failed: [youtube] abc123: Sign in to confirm you're not a bot"),
+        )
+        .await
+        .unwrap();
+        append_attempt(
+            &pool,
+            sub.id,
+            "yt-dlp",
+            true,
+            Some("Artist - Title [abc123].mp3"),
+            Some("128k"),
+            Some("mp3"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let fetched = get_submission_by_id(&pool, sub.id).await.unwrap().unwrap();
+        let raw = fetched
+            .attempts_json
+            .expect("attempts_json should not be null");
+        let arr: Vec<serde_json::Value> =
+            serde_json::from_str(&raw).expect("should be valid JSON array");
+        let valid: Vec<_> = arr.iter().filter(|v| !v.is_null()).collect();
+
+        eprintln!(
+            "Special chars test — total: {}, valid: {}",
+            arr.len(),
+            valid.len()
+        );
+        for (i, v) in arr.iter().enumerate() {
+            eprintln!("  [{i}] = {v}");
+        }
+
+        assert_eq!(
+            arr.len(),
+            valid.len(),
+            "array should not contain null entries"
+        );
+        assert_eq!(arr.len(), 4, "should have exactly 4 entries");
+    }
 }

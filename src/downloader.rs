@@ -460,15 +460,19 @@ async fn try_spotdl(
         let o = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut)
             .await
             .map_err(|_| anyhow::anyhow!("spotDL timed out after {timeout_secs}s"))??;
+        let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
         if o.status.success() {
-            // Find the file by the unique prefix we gave it (wish-{id}—)
+            // Small delay — spotDL may still be flushing the file to disk
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            // Find the file by the unique prefix we gave it
             let prefix = format!("__w{}__", sub.id);
             if let Some(f) = find_by_prefix(dir, &prefix).await {
                 tracing::info!("[{}] spotDL downloaded: {}", sub.id, f);
                 return done(pool, dir, best_dir, sub.id, &f, "spotDL").await;
             }
             // Fallback: stdout parsing + scan
-            let stdout = String::from_utf8_lossy(&o.stdout);
             if let Some(name) = stdout
                 .lines()
                 .find(|l| l.trim().starts_with("Downloaded"))
@@ -480,19 +484,52 @@ async fn try_spotdl(
                     return done(pool, dir, best_dir, sub.id, &expected, "spotDL").await;
                 }
             }
-            if let Some(f) = scan_recent(dir, 5).await {
+            if let Some(f) = scan_recent(dir, 15).await {
                 return done(pool, dir, best_dir, sub.id, &f, "spotDL").await;
             }
-            note(
-                pool,
+            // ── File not found — log diagnostics ──
+            tracing::warn!(
+                "[{}] spotDL OK but no output file\n  spotDL stdout: {}\n  spotDL stderr: {}",
                 sub.id,
-                "spotDL",
-                "spotDL exited OK but no output file found",
-            )
-            .await;
-            tracing::warn!("[{}] spotDL OK but no output file", sub.id);
+                stdout,
+                stderr
+            );
+            // List output dir for debugging
+            if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
+                let mut listing = String::new();
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let meta = entry.metadata().await;
+                    let sz = meta.as_ref().ok().map(|m| m.len());
+                    let modified = meta
+                        .as_ref()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|t| {
+                            let d = t
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            format!("{d}")
+                        })
+                        .unwrap_or_default();
+                    listing.push_str(&format!(
+                        "  {} ({} bytes, mtime={})\n",
+                        name,
+                        sz.unwrap_or(0),
+                        modified
+                    ));
+                }
+                tracing::warn!("[{}] spotDL dir contents:\n{}", sub.id, listing);
+            }
+            let summary = if stdout.is_empty() {
+                "spotDL exited OK but no output file found".into()
+            } else {
+                let truncated: String = stdout.lines().take(3).collect::<Vec<_>>().join(" | ");
+                format!("spotDL OK but no file — output: {truncated}")
+            };
+            note(pool, sub.id, "spotDL", &summary).await;
         } else {
-            let stderr = String::from_utf8_lossy(&o.stderr);
             let reason = stderr.lines().last().unwrap_or("");
             note(
                 pool,
@@ -898,10 +935,11 @@ async fn fail(pool: &SqlitePool, id: i64, msg: &str) {
 
 /// Find a file in dir whose name starts with the given prefix.
 async fn find_by_prefix(dir: &Path, prefix: &str) -> Option<String> {
+    const AUDIO_EXTS: &[&str] = &[".mp3", ".flac", ".m4a", ".opus", ".webm", ".ogg"];
     let mut entries = tokio::fs::read_dir(dir).await.ok()?;
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with(prefix) && name.ends_with(".mp3") {
+        if name.starts_with(prefix) && AUDIO_EXTS.iter().any(|ext| name.ends_with(ext)) {
             return Some(name);
         }
     }

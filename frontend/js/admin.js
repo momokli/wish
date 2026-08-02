@@ -114,9 +114,15 @@ function render() {
     var logs = [];
     try {
       if (r.attempts_json)
-        logs = JSON.parse(r.attempts_json).map(function (e) {
-          return typeof e === "string" ? JSON.parse(e) : e;
-        });
+        logs = JSON.parse(r.attempts_json)
+          .map(function (e) {
+            return typeof e === "string" ? JSON.parse(e) : e;
+          })
+          .filter(function (e) {
+            // Skip null entries that could inflate the count without
+            // rendering a visible row (null would crash the loop below).
+            return e != null && typeof e === "object";
+          });
     } catch (e) {}
 
     var cont = r.container || "";
