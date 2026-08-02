@@ -353,7 +353,7 @@ async fn download(
     }
 
     // Resolve track metadata
-    let (title, artist, cover_url, isrc) = match source.as_str() {
+    let (title, artist, cover_url, isrc, duration_ms) = match source.as_str() {
         "spotify" => {
             if let Some(spotify) = &state.spotify {
                 match spotify.get_track(&url).await {
@@ -362,25 +362,25 @@ async fn download(
                         Some(track.artist),
                         track.cover_url,
                         track.isrc,
+                        track.duration_ms.map(|d| d as i64),
                     ),
-                    _ => (None, None, None, None),
+                    _ => (None, None, None, None, None),
                 }
             } else {
-                (None, None, None, None)
+                (None, None, None, None, None)
             }
         }
         _ => {
-            // For youtube/soundcloud, try to get metadata via yt-dlp
             if state.ytdlp_available {
                 match resolve_via_ytdlp(&url).await {
-                    Ok(meta) => (meta.0, meta.1, meta.2, None),
+                    Ok(meta) => (meta.0, meta.1, meta.2, None, None),
                     Err(e) => {
                         tracing::warn!("yt-dlp metadata resolution failed for {}: {e}", url);
-                        (None, None, None, None)
+                        (None, None, None, None, None)
                     }
                 }
             } else {
-                (None, None, None, None)
+                (None, None, None, None, None)
             }
         }
     };
@@ -394,6 +394,7 @@ async fn download(
         cover_url.as_deref(),
         &source,
         isrc.as_deref(),
+        duration_ms,
     )
     .await
     .map_err(|e| AppError::Internal(format!("Failed to create submission: {}", e)))?;

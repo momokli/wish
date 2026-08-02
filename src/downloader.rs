@@ -644,6 +644,13 @@ async fn done(
         .await
         .ok()
         .flatten();
+    let sub_duration_ms: Option<i64> =
+        sqlx::query_scalar("SELECT duration_ms FROM submissions WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
 
     match extract_metadata(&full).await {
         Ok(meta) => {
@@ -735,6 +742,27 @@ async fn done(
                             )
                             .await;
                         }
+                    }
+                }
+            }
+
+            // Duration verification — file duration must be within ±25% of expected
+            if let Some(expected_ms) = sub_duration_ms {
+                if let Ok(file_duration_s) = extract_duration(&full).await {
+                    let file_ms = (file_duration_s * 1000.0) as i64;
+                    let ratio = file_ms as f64 / expected_ms as f64;
+                    if ratio < 0.75 || ratio > 1.25 {
+                        return reject_file(
+                            &full,
+                            id,
+                            &format!(
+                                "duration mismatch: file={:.0}s, expected={:.0}s ({:.0}%)",
+                                file_duration_s,
+                                expected_ms as f64 / 1000.0,
+                                ratio * 100.0
+                            ),
+                        )
+                        .await;
                     }
                 }
             }
@@ -928,6 +956,28 @@ fn titles_match(file_str: &str, expected: &str) -> bool {
     // Substring match — expected title must be at least 5 chars to avoid
     // false positives like "Red" matching "Red Sun In The Sky".
     e.len() >= 5 && f.contains(&e)
+}
+
+/// Extract audio duration in seconds from a file via ffprobe.
+async fn extract_duration(path: &Path) -> anyhow::Result<f64> {
+    let output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .await?;
+
+    if output.status.success() {
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return raw.parse::<f64>().context("parse duration");
+    }
+    anyhow::bail!("ffprobe duration failed");
 }
 
 /// Normalize a title/artist string for fuzzy comparison.

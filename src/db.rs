@@ -23,11 +23,12 @@ pub async fn insert_submission(
     cover_url: Option<&str>,
     source: &str,
     isrc: Option<&str>,
+    duration_ms: Option<i64>,
 ) -> anyhow::Result<Submission> {
     sqlx::query_as::<_, Submission>(
-        "INSERT INTO submissions (spotify_url, track_title, track_artist, cover_url, source, isrc, status) VALUES (?, ?, ?, ?, ?, ?, 'pending') RETURNING *"
+        "INSERT INTO submissions (spotify_url, track_title, track_artist, cover_url, source, isrc, duration_ms, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending') RETURNING *"
     )
-    .bind(spotify_url).bind(track_title).bind(track_artist).bind(cover_url).bind(source).bind(isrc)
+    .bind(spotify_url).bind(track_title).bind(track_artist).bind(cover_url).bind(source).bind(isrc).bind(duration_ms)
     .fetch_one(pool).await.context("Failed to insert submission")
 }
 /// Store deemix tracking IDs right after add_to_queue succeeds.
@@ -44,7 +45,6 @@ pub async fn set_deemix_ids(
     .execute(pool).await?;
     Ok(())
 }
-
 
 pub async fn get_submissions(
     pool: &SqlitePool,
@@ -288,6 +288,7 @@ mod tests {
             Some("https://example.com/cover.jpg"),
             "spotify",
             None,
+            None,
         )
         .await
         .expect("Failed to insert");
@@ -311,6 +312,7 @@ mod tests {
             None,
             "spotify",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -322,6 +324,7 @@ mod tests {
             None,
             "spotify",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -332,6 +335,7 @@ mod tests {
             Some("C"),
             None,
             "spotify",
+            None,
             None,
         )
         .await
@@ -360,6 +364,7 @@ mod tests {
             None,
             "spotify",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -383,6 +388,7 @@ mod tests {
             None,
             "spotify",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -393,6 +399,7 @@ mod tests {
             Some("2"),
             None,
             "spotify",
+            None,
             None,
         )
         .await
