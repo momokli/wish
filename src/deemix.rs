@@ -129,6 +129,27 @@ impl DeemixClient {
         }
     }
 
+    /// Health check: verify deemix is reachable and ARL is valid.
+    /// Returns (reachable, user_name, country, lossless).
+    pub async fn check(&self) -> anyhow::Result<(bool, String, String, bool)> {
+        // 1. Verify service is reachable
+        let resp = self
+            .client
+            .get(format!("{}/api/getQueue", self.base_url))
+            .send()
+            .await
+            .context("deemix unreachable")?;
+        let reachable = resp.status().is_success();
+
+        // 2. Verify ARL is valid by re-authenticating
+        let login = self.login_arl(&self.arl).await?;
+        let name = login.user.name.unwrap_or_else(|| "?".into());
+        let country = login.user.country.unwrap_or_else(|| "?".into());
+        let lossless = login.user.can_stream_lossless.unwrap_or(false);
+
+        Ok((reachable, name, country, lossless))
+    }
+
     /// Authenticate with a Deezer ARL token.
     pub async fn login_arl(&self, arl: &str) -> anyhow::Result<DeemixLoginResponse> {
         let body = serde_json::json!({"status": 1, "arl": arl});

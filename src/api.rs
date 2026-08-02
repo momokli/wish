@@ -61,6 +61,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Admin
         .route("/admin", get(serve_admin))
         .route("/admin/data", get(admin_data))
+        .route("/admin/deemix-check", get(admin_deemix_check))
         .layer(cors)
         .with_state(state)
 }
@@ -89,6 +90,54 @@ async fn admin_data(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Admin
     .await
     .map_err(|e| AppError::Internal(format!("DB error: {e}")))?;
     Ok(Json(rows))
+}
+
+#[derive(serde::Serialize)]
+struct DeemixCheckResponse {
+    reachable: bool,
+    authenticated: bool,
+    user: String,
+    country: String,
+    lossless: bool,
+    base_url: String,
+    error: Option<String>,
+}
+
+async fn admin_deemix_check(State(state): State<Arc<AppState>>) -> Json<DeemixCheckResponse> {
+    let c = &state.config.deemix;
+    if c.arl.is_empty() {
+        return Json(DeemixCheckResponse {
+            reachable: false,
+            authenticated: false,
+            user: "?".into(),
+            country: "?".into(),
+            lossless: false,
+            base_url: c.base_url.clone(),
+            error: Some("ARL not configured".into()),
+        });
+    }
+
+    let client = crate::deemix::DeemixClient::new(c.base_url.clone(), c.arl.clone());
+    match client.check().await {
+        Ok((reachable, name, country, lossless)) => Json(DeemixCheckResponse {
+            reachable,
+            authenticated: true,
+            user: name,
+            country,
+            lossless,
+            base_url: c.base_url.clone(),
+            error: None,
+        }),
+        Err(e) => Json(DeemixCheckResponse {
+            reachable: false,
+            authenticated: false,
+            user: "?".into(),
+            country: "?".into(),
+            lossless: false,
+            base_url: c.base_url.clone(),
+            error: Some(format!("{e:#}")),
+        }),
+    }
 }
 
 // ─── Playlists ────────────────────────────────────────────────────
