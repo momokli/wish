@@ -1,151 +1,136 @@
-# 🎵 Wish
+# wish
 
-**Song request server** — guests search across Spotify, YouTube, and SoundCloud and submit track links. The server downloads tracks through a multi-stage pipeline (deemix → spotDL → yt-dlp). Downloaded files are served over HTTPS for [Deck Feeder](https://github.com/momokli/deck-feeder).
+Song request server for DJs. Guests search Spotify, YouTube, and SoundCloud,
+submit tracks, and the server downloads them through a multi-stage pipeline.
+Files are served for [Deck Feeder](https://github.com/momokli/deck-feeder).
 
-Built with **Rust** (Axum/SQLx/SQLite), embedded SPA frontend (vanilla JS/HTML/CSS).
+Built with Rust (Axum, SQLx, SQLite) and a vanilla JS frontend embedded in the binary.
+
+![](screenshots/search.png)
 
 ## Quick Start
 
 ```bash
-# Build
 cargo build --release
-
-# Run
 cargo run -- serve
-
-# Or specify a port
-cargo run -- serve --port 8080
 ```
 
-The server starts at `http://localhost:3000`. Open your browser to see the song request UI.
+Opens at `http://localhost:3000`.
 
-## Configuration
+## Config
 
-Configuration is loaded with priority: **env vars > `~/.config/wish/config.toml` > defaults**.
-
-### Config file (`~/.config/wish/config.toml`)
+Priority: env vars > `~/.config/wish/config.toml` > defaults.
 
 ```toml
+# ~/.config/wish/config.toml
 [spotify]
-client_id     = "your_spotify_client_id"
-client_secret = "your_spotify_client_secret"
+client_id     = "..."
+client_secret = "..."
 
 [deemix]
 base_url = "http://localhost:6596"
+arl      = "..."
 
 [download]
-output_dir = "/opt/download-service/downloads/tracks"
-max_per_user = 5
+output_dir    = "/opt/wish-downloads"
+max_per_user  = 5
 ```
 
-### Environment variables
+Environment variables: `WISH_SPOTIFY_CLIENT_ID`, `WISH_SPOTIFY_CLIENT_SECRET`,
+`WISH_DEEMIX_BASE_URL`, `WISH_DEEMIX_ARL`, `WISH_DOWNLOAD_OUTPUT_DIR`,
+`WISH_PORT`, `DATABASE_URL`.
 
-| Variable                     | Description               | Default                   |
-| ---------------------------- | ------------------------- | ------------------------- |
-| `WISH_SPOTIFY_CLIENT_ID`     | Spotify API client ID     | (empty)                   |
-| `WISH_SPOTIFY_CLIENT_SECRET` | Spotify API client secret | (empty)                   |
-| `WISH_DEEMIX_BASE_URL`       | Deemix API URL            | `http://localhost:6596`   |
-| `WISH_DOWNLOAD_OUTPUT_DIR`   | Download output directory | `./downloads`             |
-| `WISH_DOWNLOAD_MAX_PER_USER` | Rate limit per session    | `5`                       |
-| `WISH_PORT`                  | Server port               | `3000`                    |
-| `DATABASE_URL`               | SQLite database URL       | `sqlite:wish.db?mode=rwc` |
+## API
 
-## API Endpoints
+### Public
 
-### Public (guest-facing)
+| Endpoint                             | Method | Description                                      |
+| ------------------------------------ | ------ | ------------------------------------------------ |
+| `/`                                  | GET    | Frontend SPA                                     |
+| `/search?q=…&limit=5&source=spotify` | GET    | Multi-source search (spotify/youtube/soundcloud) |
+| `/download`                          | POST   | Submit `{"url":"…","source":"…"}` for download   |
+| `/queue`                             | GET    | All submissions with status                      |
+| `/stats`                             | GET    | `{total, ready, failed, pending}`                |
+| `/health`                            | GET    | Service status                                   |
 
-| Endpoint                    | Method | Description                                                              |
-| --------------------------- | ------ | ------------------------------------------------------------------------ |
-| `/`                         | GET    | Embedded SPA frontend (search + request UI)                              |
-| `/search?q={query}&limit=5` | GET    | Spotify track search                                                     |
-| `/download`                 | POST   | Submit `{"url": "spotify:track:..."}` for download                       |
-| `/queue`                    | GET    | List submitted tracks with download status                               |
-| `/stats`                    | GET    | `{total, ready, failed, pending}`                                        |
-| `/health`                   | GET    | `{status:"ok", deemix_configured, spotify_configured, spotdl_available}` |
+### Playlists
 
-### Deck Feeder integration
+| Endpoint               | Method | Description                |
+| ---------------------- | ------ | -------------------------- |
+| `/playlists`           | GET    | List subscribed playlists  |
+| `/playlists`           | POST   | Add playlist `{"url":"…"}` |
+| `/playlists/{id}`      | DELETE | Remove playlist            |
+| `/playlists/{id}/sync` | POST   | Force re-sync              |
 
-| Endpoint                | Method | Description                                               |
-| ----------------------- | ------ | --------------------------------------------------------- |
-| `/tracks`               | GET    | List downloadable files: `[{filename, size, url, ready}]` |
-| `/downloads/{filename}` | GET    | Serve a downloaded file (supports Range requests)         |
+### Deck Feeder
 
-### curl examples
+| Endpoint                | Method | Description                      |
+| ----------------------- | ------ | -------------------------------- |
+| `/tracks`               | GET    | `[{filename, size, url, ready}]` |
+| `/downloads/{filename}` | GET    | Serve file with Range support    |
 
-```bash
-# Health check
-curl localhost:3000/health
+### Admin
 
-# Search Spotify
-curl "localhost:3000/search?q=daft+punk&limit=3"
-
-# Submit a track
-curl -X POST localhost:3000/download \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"spotify:track:4cOdK2wGLETKBW3PvgPWqT"}'
-
-# View queue
-curl localhost:3000/queue
-
-# Get stats
-curl localhost:3000/stats
-
-# List downloadable tracks (for Deck Feeder)
-curl localhost:3000/tracks
-```
+| Endpoint      | Method | Description                                      |
+| ------------- | ------ | ------------------------------------------------ |
+| `/admin`      | GET    | Admin SPA                                        |
+| `/admin/data` | GET    | All submissions with attempt logs, bitrate, ISRC |
 
 ## Download Pipeline
 
-Two-stage, non-blocking:
-
 ```
-POST /download {url: "spotify:track:xxx"}
-  → INSERT INTO submissions (url, status="pending")
-  → Background worker picks it up:
-    1. deemix: POST http://localhost:6596/api/addToQueue
-       → Polls GET /api/getQueue until done
-       → Success → status="ready"
-    2. spotDL (fallback): if deemix fails
-       → spotdl download <spotify_url> --output <output_dir>
-       → Success → status="ready"
-       → Failure → status="failed"
+POST /download → status=pending
+  → L1: deemix (320kbps MP3 from Deezer)
+    → success → ready, symlinked into best/
+  → L2: spotDL (fallback)
+    → success → ready, symlinked into best/
+  → L3: yt-dlp (last resort)
+    → success → ready, symlinked into best/
+  → all failed → status=failed
 ```
 
-**Status lifecycle**: `pending` → `stage2_deemix` → `stage3_spotdl` → `ready` | `failed`
+YouTube and SoundCloud URLs go directly to yt-dlp.
+
+## File Layout
+
+Downloads are split by source with a unified `best/` directory:
+
+```
+output_dir/
+├── deemix/   ← 320kbps MP3 from Deezer
+├── spotdl/   ← fallback downloads
+└── best/     ← symlinks to the best available version per track
+```
+
+ISRC-based dedup: if both deemix and spotDL download the same track,
+`best/` only links to the deemix version.
+
+A standalone [dufs](https://github.com/sigoden/dufs) instance serves `best/`
+for browsing and streaming (e.g., `fairy.zukkafabrik.de`).
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[Guest Browser] -->|Search/Request| B[Axum Server]
-    B -->|Query| C[(SQLite)]
-    B -->|Search| D[Spotify API]
-    B -->|Notify| E[Download Worker]
-    E -->|Stage 1| F[Deemix Container]
-    E -->|Stage 2 Fallback| G[spotDL CLI]
-    E -->|Write| H[Output Dir]
-    B -->|Serve Files| H
-    I[Deck Feeder] -->|GET /tracks| B
-    I -->|GET /downloads/*| H
+    A[Browser] -->|search/request| B[wish :8700]
+    B --> C[(SQLite)]
+    B --> D[Spotify API]
+    B --> E[Download Worker]
+    E --> F[deemix Docker]
+    E --> G[spotDL / yt-dlp]
+    E --> H[deemix/ spotdl/]
+    H -->|symlink| I[best/]
+    I --> J[dufs :5000]
+    K[Deck Feeder] -->|GET /tracks| B
+    K -->|GET /downloads| B
 ```
 
 ## Deployment
 
-### Prerequisites
+Prerequisites: deemix Docker container, spotDL on PATH, yt-dlp on PATH,
+Spotify API credentials.
 
-- [Deemix](https://gitlab.com/Bockiii/deemix-pyweb) running as a Docker container on `localhost:6596`
-- [spotDL](https://github.com/spotDL/spotify-downloader) installed on PATH
-- Spotify API credentials (from [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/))
-
-### Caddy reverse proxy
-
-```caddy
-wish.example.com {
-    reverse_proxy localhost:3000
-}
-```
-
-### systemd service
+### systemd
 
 ```ini
 [Unit]
@@ -154,34 +139,43 @@ After=network.target
 
 [Service]
 Type=simple
-User=wish
-ExecStart=/opt/wish/wish serve
-Restart=always
-Environment=WISH_PORT=3000
-Environment=DATABASE_URL=sqlite:/opt/wish/wish.db?mode=rwc
+User=momo
+ExecStart=/home/momo/wish/target/release/wish serve
+Restart=on-failure
+Environment=WISH_PORT=8700
+Environment=DATABASE_URL=sqlite:/home/momo/wish/wish.db?mode=rwc
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-## Development
+### Caddy
+
+```caddy
+wish.example.com {
+    reverse_proxy 127.0.0.1:8700
+}
+
+files.wish.example.com {
+    reverse_proxy 127.0.0.1:5000
+}
+```
+
+### Ansible
+
+See `ansible/` for inventory and playbook. Targets: `music` (wish binary) and `lan` (Caddy config).
+
+## Dev
 
 ```bash
-# Build
 cargo build
-
-# Run tests (must pass with zero failures)
 cargo test
-
-# Run a specific test file
-cargo test --test api_submissions
-
-# Create a new migration
-touch migrations/002_description.sql
-
-# Check DB schema
-sqlite3 wish.db ".schema"
+bash scripts/validate.sh       # full check: build, test, lint, frontend
+node scripts/build-html.mjs    # rebuild embedded frontend
 ```
+
+Migrations are timestamped SQL files in `migrations/` — just add a new file,
+`sqlx::migrate!` handles the rest. Never modify existing migrations.
 
 ## License
 
