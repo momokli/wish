@@ -505,7 +505,7 @@
             "downloadLocation": "/downloads",
             "tracknameTemplate": "%artist% - %title%",
             "queueConcurrency": 3,
-            "maxBitrate": "3",
+            "maxBitrate": "1",
             "fallbackBitrate": true,
             "fallbackSearch": false,
             "fallbackISRC": true,
@@ -522,6 +522,13 @@
       become: yes
       tags: [deemix]
 
+    - name: Fix deemix-wish download dir permissions (container runs as uid 911)
+      ansible.builtin.file:
+        path: /opt/music-stack/wish-downloads/deemix
+        mode: "0777"
+      become: yes
+      tags: [deemix]
+
     - name: Start deemix-wish container
       community.docker.docker_container:
         name: deemix-wish
@@ -533,10 +540,6 @@
         volumes:
           - /opt/music-stack/deemix-wish-config:/config
           - /opt/music-stack/wish-downloads/deemix:/downloads
-        env:
-          PUID: "1000"
-          PGID: "1000"
-          UMASK: "000"
       tags: [deemix]
 
     - name: Authenticate deemix-wish with ARL
