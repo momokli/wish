@@ -724,14 +724,17 @@ async fn done(
                         .await;
                     }
                 }
-                if let (Some(fa), Some(sa)) = (&meta.artist, &sub_artist) {
-                    if !titles_match(fa, sa) {
-                        return reject_file(
-                            &full,
-                            id,
-                            &format!("artist mismatch: file='{fa}', expected='{sa}'"),
-                        )
-                        .await;
+                // Artist check skipped for yt-dlp — YouTube artist names rarely match Spotify
+                if stage != "yt-dlp" {
+                    if let (Some(fa), Some(sa)) = (&meta.artist, &sub_artist) {
+                        if !titles_match(fa, sa) {
+                            return reject_file(
+                                &full,
+                                id,
+                                &format!("artist mismatch: file='{fa}', expected='{sa}'"),
+                            )
+                            .await;
+                        }
                     }
                 }
             }
