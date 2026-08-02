@@ -385,7 +385,7 @@
       ansible.builtin.git:
         repo: https://github.com/momokli/wish.git
         dest: "{{ wish_home }}"
-        version: feat/lan-deploy
+        version: fix/download-verification
       tags: [deploy]
 
     - name: Build wish release binary
@@ -470,28 +470,65 @@
       loop:
         - /opt/music-stack/deemix-wish-config/spotify
         - /opt/music-stack/wish-downloads
+        - /opt/music-stack/wish-downloads/deemix
+        - /opt/music-stack/wish-downloads/spotdl
+        - /opt/music-stack/wish-downloads/best
       tags: [deemix]
 
-    - name: Clone deemix-128 config for deemix-wish
+    - name: Clone deemix-128 config for deemix-wish (first run only)
       ansible.builtin.shell: |
-        if [ -f /opt/music-stack/deemix-128-config/config.json ]; then
-          cp -n /opt/music-stack/deemix-128-config/config.json /opt/music-stack/deemix-wish-config/config.json
-          cp -n /opt/music-stack/deemix-128-config/spotify/config.json /opt/music-stack/deemix-wish-config/spotify/config.json
+        if [ ! -f /opt/music-stack/deemix-wish-config/config.json ]; then
+          if [ -f /opt/music-stack/deemix-128-config/config.json ]; then
+            cp /opt/music-stack/deemix-128-config/config.json /opt/music-stack/deemix-wish-config/config.json
+            cp /opt/music-stack/deemix-128-config/spotify/config.json /opt/music-stack/deemix-wish-config/spotify/config.json
+          fi
         fi
       changed_when: false
+      tags: [deemix]
+
+    - name: Purge stale deemix queue (prevents duplicate-tracked downloads)
+      ansible.builtin.file:
+        path: /opt/music-stack/deemix-wish-config/queue
+        state: absent
+      tags: [deemix]
+
+    - name: Deploy deemix-wish config — 320kbps MP3 + Spotify plugin + fallbackISRC
+      ansible.builtin.copy:
+        dest: /opt/music-stack/deemix-wish-config/config.json
+        owner: "{{ wish_user }}"
+        mode: "0666"
+        content: |
+          {
+            "downloadLocation": "/downloads",
+            "tracknameTemplate": "%artist% - %title%",
+            "queueConcurrency": 3,
+            "maxBitrate": "3",
+            "fallbackBitrate": true,
+            "fallbackSearch": false,
+            "fallbackISRC": true,
+            "overwriteFile": "n",
+            "spotifyPlugin": true,
+            "spotifyClientId": "{{ spotify_client_id }}",
+            "spotifyClientSecret": "{{ spotify_client_secret }}",
+            "createSingleFolder": true,
+            "createAlbumFolder": false,
+            "createArtistFolder": false,
+            "logErrors": true,
+            "logSearched": false
+          }
       tags: [deemix]
 
     - name: Start deemix-wish container
       community.docker.docker_container:
         name: deemix-wish
-        image: registry.gitlab.com/bockiii/deemix-docker:latest
+        image: "{{ deemix_image }}"
         state: started
         restart_policy: unless-stopped
         ports:
           - "6598:6595"
         volumes:
           - /opt/music-stack/deemix-wish-config:/config
-          - /opt/music-stack/wish-downloads:/downloads
+          - /opt/music-stack/wish-downloads/deemix:/downloads
         env:
           PUID: "1000"
           PGID: "1000"

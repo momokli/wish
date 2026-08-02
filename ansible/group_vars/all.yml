@@ -13,7 +13,7 @@ download_dir: /opt/download-service/downloads
 deemix_port: 6595
 
 # Deemix Docker
-deemix_image: registry.gitlab.com/bockiii/deemix-docker:latest
+deemix_image: ghcr.io/bambanah/deemix:v4.6.0
 
 # yt-dlp / spotdl venv
 venv_path: /srv/download-service/.venv
