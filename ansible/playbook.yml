@@ -11,6 +11,7 @@
 - name: Deploy Wish backend on projectmellon.de
   hosts: all
   become: yes
+  tags: [hetzner]
 
   # ── Pre-flight checks ───────────────────────────────────────────
   pre_tasks:
@@ -386,6 +387,7 @@
         repo: https://github.com/momokli/wish.git
         dest: "{{ wish_home }}"
         version: fix/download-verification
+        force: yes
       tags: [deploy]
 
     - name: Build wish release binary
@@ -490,6 +492,7 @@
       ansible.builtin.file:
         path: /opt/music-stack/deemix-wish-config/queue
         state: absent
+      become: yes
       tags: [deemix]
 
     - name: Deploy deemix-wish config — 320kbps MP3 + Spotify plugin + fallbackISRC
@@ -516,6 +519,7 @@
             "logErrors": true,
             "logSearched": false
           }
+      become: yes
       tags: [deemix]
 
     - name: Start deemix-wish container
