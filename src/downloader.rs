@@ -312,16 +312,11 @@ async fn try_deemix(
             e.uuid.clone()
         }
         None => {
-            // Duplicate — already in queue from a previous run.
-            // Don't try to match; just fall through to spotDL.
-            note(
-                pool,
-                sub.id,
-                "deemix",
-                "duplicate in queue — falling back to spotDL",
-            )
-            .await;
-            anyhow::bail!("deemix: duplicate (already queued)");
+            // No UUID from add_to_queue — either already queued (duplicate)
+            // or deemix couldn't resolve the track (not on Deezer).
+            // Fall through to spotDL in either case.
+            note(pool, sub.id, "deemix", "no UUID — falling back to spotDL").await;
+            anyhow::bail!("deemix: no UUID (track not on Deezer or already queued)");
         }
     };
 

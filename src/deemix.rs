@@ -207,7 +207,18 @@ impl DeemixClient {
                         }));
                     }
                 }
-                tracing::info!("Added to deemix queue (already queued): {}", url);
+                // result=true but no UUID — could be already queued (obj has
+                // items with empty uuid) or track not resolvable (obj is empty).
+                let obj = full.data.as_ref().map(|d| d.obj.len()).unwrap_or(0);
+                if obj > 0 {
+                    tracing::info!("Deemix addToQueue already queued: {}", url);
+                } else {
+                    tracing::warn!(
+                        "Deemix could not resolve track (empty obj): {}. Response: {}",
+                        url,
+                        text
+                    );
+                }
                 return Ok(None);
             }
             // Check for NotLoggedIn — re-auth and retry once
