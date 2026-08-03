@@ -302,6 +302,9 @@ async fn try_deemix(
 
     note(pool, sub.id, "deemix", "add_to_queue").await;
 
+    // Snapshot existing files before we trigger deemix
+    let known = list_files(dir).await;
+
     // Fire & forget — we don't care about UUID, we scan filesystem instead
     let enqueue = deemix.add_to_queue(&sub.spotify_url).await;
     match &enqueue {
@@ -342,11 +345,14 @@ async fn try_deemix(
     .await;
     let start = std::time::Instant::now();
     let poll = std::time::Duration::from_secs(2);
-    let mut found_matching = false;
 
     while start.elapsed().as_secs() < timeout_secs {
-        if let Some(f) = scan_recent(dir, 10).await {
-            let full = dir.join(&f);
+        let current = list_files(dir).await;
+        for f in current.difference(&known) {
+            if !f.ends_with(".mp3") && !f.ends_with(".flac") && !f.ends_with(".m4a") {
+                continue;
+            }
+            let full = dir.join(f);
             // If we have an ISRC, verify it matches
             if let Some(ref expected) = sub_isrc {
                 if let Ok(Some(file_isrc)) = extract_metadata_isrc(&full).await {
@@ -357,23 +363,19 @@ async fn try_deemix(
                             f,
                             file_isrc
                         );
-                        found_matching = true;
-                    } else {
-                        tracing::debug!(
-                            "[{}] deemix file ISRC mismatch: {} (file={}, expected={})",
-                            sub.id,
-                            f,
-                            file_isrc,
-                            expected
-                        );
-                        tokio::time::sleep(poll).await;
-                        continue;
+                        return done(pool, dir, best_dir, sub.id, f, "deemix").await;
                     }
+                    tracing::debug!(
+                        "[{}] deemix new file ISRC mismatch: {} (file={}, expected={})",
+                        sub.id,
+                        f,
+                        file_isrc,
+                        expected
+                    );
                 }
-            }
-            // No ISRC to compare — trust the file (but still verify via done())
-            if found_matching || sub_isrc.is_none() {
-                return done(pool, dir, best_dir, sub.id, &f, "deemix").await;
+            } else {
+                // No ISRC to compare — accept any new audio file
+                return done(pool, dir, best_dir, sub.id, f, "deemix").await;
             }
         }
         tokio::time::sleep(poll).await;
@@ -415,6 +417,17 @@ async fn extract_metadata_isrc(path: &Path) -> anyhow::Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+/// List all filenames in a directory (flat, non-recursive).
+async fn list_files(dir: &Path) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            set.insert(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    set
 }
 
 async fn try_spotdl(
