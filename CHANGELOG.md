@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.2] — 2026-08-03
+
+### Added
+
+- **Download verification pipeline**: every download is verified before marking `ready`
+  - ISRC extraction and comparison (primary, exact match)
+  - Title/artist fuzzy matching with substring tolerance (handles YouTube prefixes)
+  - Duration verification (±25% tolerance)
+  - Artist verification for all non-yt-dlp sources
+  - Wrong files are quarantined to `_rejected/` instead of silently accepted
+  - Cross-submission ISRC reassignment (file reassigned if ISRC matches another submission)
+- `/admin/deemix-check` endpoint — validates deemix reachability and ARL status
+- `duration_ms` column on submissions (migration 20260802140000)
+- Transparent per-layer logging: L1/L2/L3 with failure reasons
+- YouTube/SoundCloud cover thumbnails in search results
+- Test scripts: `scripts/test-reset.sh`, `scripts/test-one-track.sh`, `scripts/test-state.sh`
+- Ansible: Deno install for spotDL, spotDL Spotify config, deemix permissions fix
+
+### Changed
+
+- Deemix image: `bockiii/deemix-docker:latest` → `ghcr.io/bambanah/deemix:v4.6.0` (fixes static track_id bug)
+- Deemix file detection: UUID polling replaced with snapshot-based filesystem watch
+- spotDL: 500ms fixed delay → 60s polling loop with file size stability detection
+- spotDL: LookupError/SearchError detected and bailed immediately (no wasted retries)
+- Admin: `duration_ms` column added to data view
+- Admin: null entries filtered from `attempts_json` count
+
+### Fixed
+
+- Deemix permissions: download dir `chmod 777` for container uid 911
+- Deemix `maxBitrate: 1` for free Deezer accounts (was 3/320kbps → `CantStream`)
+- spotDL LookupError incorrectly treated as success (exits 0 but no file)
+- `scan_recent` only returned most-recent file, hiding files from concurrent downloads
+- Artist check now runs even when ISRC matches (Fortuna vs Gippeul on Deezer)
+
 ## [0.2.0] — 2026-07-19
 
 ### Added

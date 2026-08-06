@@ -1,6 +1,6 @@
 # Wish — Agent Guidance
 
-> **Last Updated**: 2026-08-02 — v0.7.2 (download verification, next: subscribed-playlists or v0.8.0)
+> **Last Updated**: 2026-08-03 — v0.7.2 (download verification complete, POC validated)
 
 ---
 
@@ -1214,8 +1214,8 @@ A first (foundation). Then B + C in parallel. Then D + E + F in parallel.
 
 ## Plan: download-verification
 
-**Status**: in-progress
-**Branch**: `fix/download-verification`
+**Status**: done
+**Branch**: `fix/download-verification` (rebased onto main)
 **Depends on**: rust-rewrite-v1, multi-source-search, full-pipeline-verification
 
 ### Research: "Red Sun In The Sky" Wrong Song Match
@@ -1288,11 +1288,33 @@ implemented here — separate deploy concern.
 
 ### Acceptance Criteria
 
-- [ ] `extract_metadata()` reliably extracts title, artist, ISRC from MP3/FLAC/M4A files
-- [ ] When ISRC mismatch detected and no other submission matches → file rejected, falls through to spotDL
-- [ ] When title/artist clearly mismatch → file rejected
-- [ ] When metadata matches → file accepted as before
-- [ ] Rejected files quarantined to `_rejected/` subdirectory (not deleted)
-- [ ] `cargo build` passes
-- [ ] `cargo test` passes
-- [ ] Existing download pipeline behavior unchanged for correct matches
+- [x] `extract_metadata()` reliably extracts title, artist, ISRC from MP3/FLAC/M4A files
+- [x] When ISRC mismatch detected and no other submission matches → file rejected, falls through to spotDL
+- [x] When title/artist clearly mismatch → file rejected
+- [x] When metadata matches → file accepted as before
+- [x] Rejected files quarantined to `_rejected/` subdirectory (not deleted)
+- [x] `cargo build` passes (0 warnings relevant)
+- [x] `cargo test` passes (36/36)
+- [x] Existing download pipeline behavior unchanged for correct matches
+
+### Additional accomplishments (beyond plan)
+
+- [x] Duration verification (±25% tolerance, db migration)
+- [x] Snapshot-based file detection (list_files) instead of scan_recent (concurrent-safe)
+- [x] Artist verification runs always (not just when ISRC absent)
+- [x] Substring title matching (handles YouTube prefixes)
+- [x] spotDL polling loop with size-stability detection (replaces 500ms delay)
+- [x] spotDL LookupError/SearchError detection (bails immediately)
+- [x] Deemix image upgraded to ghcr.io/bambanah/deemix:v4.6.0
+- [x] `/admin/deemix-check` endpoint
+- [x] `duration_ms` in admin view
+- [x] YouTube/SoundCloud cover thumbnails
+- [x] Per-layer transparent logging (L1/L2/L3 with reasons)
+- [x] Test scripts: reset, submit-one, state
+- [x] Ansible: Deno install for spotDL, spotDL Spotify config, deemix perms fix
+
+### Known gaps
+
+- Deemix queue persistence (needs deeper fix — queue survives rm -rf)
+- Red Sun In The Sky fails: spotDL LookupError, yt-dlp query word order finds wrong versions
+- yt-dlp: `ytsearch1:Artist - Title` vs `ytsearch1:Title Artist` yields different results
