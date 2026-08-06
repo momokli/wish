@@ -475,73 +475,92 @@ async fn try_spotdl(
             .map_err(|_| anyhow::anyhow!("spotDL timed out after {timeout_secs}s"))??;
         let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-        if o.status.success() {
-            // Small delay — spotDL may still be flushing the file to disk
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-            // Find the file by the unique prefix we gave it
-            let prefix = format!("__w{}__", sub.id);
-            if let Some(f) = find_by_prefix(dir, &prefix).await {
-                tracing::info!("[{}] spotDL downloaded: {}", sub.id, f);
-                return done(pool, dir, best_dir, sub.id, &f, "spotDL").await;
-            }
-            // Fallback: stdout parsing + scan
-            if let Some(name) = stdout
+        // spotDL 4.5.2 exits 0 even on lookup failures — detect them
+        let combined = format!("{stdout}\n{stderr}");
+        if combined.contains("LookupError")
+            || combined.contains("No results found")
+            || combined.contains("SearchError")
+        {
+            let snippet = combined
+                .lines()
+                .filter(|l| {
+                    let lo = l.to_lowercase();
+                    lo.contains("lookuperror")
+                        || lo.contains("no results found")
+                        || lo.contains("searcherror")
+                })
+                .next()
+                .unwrap_or(&combined)
+                .trim()
+                .to_string();
+            note(pool, sub.id, "spotDL", &format!("fatal: {snippet}")).await;
+            tracing::warn!("[{}] spotDL {a} fatal: {snippet}", sub.id);
+            anyhow::bail!("spotDL fatal: {snippet}");
+        }
+
+        if o.status.success() {
+            // Parse stdout for the filename spotDL reports
+            let downloaded_name = stdout
                 .lines()
                 .find(|l| l.trim().starts_with("Downloaded"))
-                .and_then(|l| l.split('"').nth(1))
-            {
-                let expected = format!("{name}.mp3");
-                let full_path = dir.join(&expected);
-                if full_path.exists() {
-                    return done(pool, dir, best_dir, sub.id, &expected, "spotDL").await;
+                .and_then(|l| l.split('"').nth(1));
+
+            let prefix = format!("__w{}__", sub.id);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let mut found_name: Option<String> = None;
+            let mut last_size: Option<u64> = None;
+            let mut stable_since: Option<std::time::Instant> = None;
+
+            while std::time::Instant::now() < deadline {
+                if found_name.is_none() {
+                    if let Some(f) = find_by_prefix(dir, &prefix).await {
+                        found_name = Some(f);
+                    }
                 }
+                if found_name.is_none() {
+                    if let Some(name) = downloaded_name {
+                        let expected = format!("{name}.mp3");
+                        if dir.join(&expected).exists() {
+                            found_name = Some(expected);
+                        }
+                    }
+                }
+                if let Some(ref f) = found_name {
+                    let full = dir.join(f);
+                    if let Ok(meta) = tokio::fs::metadata(&full).await {
+                        let sz = meta.len();
+                        if Some(sz) == last_size {
+                            if let Some(since) = stable_since {
+                                if since.elapsed().as_secs() >= 1 {
+                                    tracing::info!("[{}] spotDL downloaded: {}", sub.id, f);
+                                    return done(pool, dir, best_dir, sub.id, f, "spotDL").await;
+                                }
+                            } else {
+                                stable_since = Some(std::time::Instant::now());
+                            }
+                        } else {
+                            last_size = Some(sz);
+                            stable_since = None;
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            if let Some(f) = scan_recent(dir, 15).await {
-                return done(pool, dir, best_dir, sub.id, &f, "spotDL").await;
-            }
-            // ── File not found — log diagnostics ──
+
             tracing::warn!(
-                "[{}] spotDL OK but no output file\n  spotDL stdout: {}\n  spotDL stderr: {}",
+                "[{}] spotDL exited OK but file never appeared (60s)\n  stdout: {}\n  stderr: {}",
                 sub.id,
                 stdout,
                 stderr
             );
-            // List output dir for debugging
-            if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
-                let mut listing = String::new();
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let meta = entry.metadata().await;
-                    let sz = meta.as_ref().ok().map(|m| m.len());
-                    let modified = meta
-                        .as_ref()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .map(|t| {
-                            let d = t
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            format!("{d}")
-                        })
-                        .unwrap_or_default();
-                    listing.push_str(&format!(
-                        "  {} ({} bytes, mtime={})\n",
-                        name,
-                        sz.unwrap_or(0),
-                        modified
-                    ));
-                }
-                tracing::warn!("[{}] spotDL dir contents:\n{}", sub.id, listing);
-            }
-            let summary = if stdout.is_empty() {
-                "spotDL exited OK but no output file found".into()
-            } else {
-                let truncated: String = stdout.lines().take(3).collect::<Vec<_>>().join(" | ");
-                format!("spotDL OK but no file — output: {truncated}")
-            };
-            note(pool, sub.id, "spotDL", &summary).await;
+            note(
+                pool,
+                sub.id,
+                "spotDL",
+                "spotDL OK but file never appeared (60s)",
+            )
+            .await;
         } else {
             let reason = stderr.lines().last().unwrap_or("");
             note(
